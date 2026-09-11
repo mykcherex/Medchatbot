@@ -210,6 +210,8 @@ class TelegramBotManager {
       timestamp: number;
     }
   > = new Map();
+  private customSystemPrompts: Map<number | string, string> = new Map();
+  private userStates: Map<number | string, string> = new Map();
   private logs: MessageLogEntry[] = [];
   private totalLatencySum: number = 0;
   private totalLatencyCount: number = 0;
@@ -244,6 +246,10 @@ class TelegramBotManager {
 
   public getApiBase(): string {
     return `https://api.telegram.org/bot${this.token}`;
+  }
+
+  private getSystemPrompt(chatId: number | string): string {
+    return this.customSystemPrompts.get(chatId) || this.config.systemInstruction;
   }
 
   public async initialize(): Promise<void> {
@@ -764,7 +770,7 @@ class TelegramBotManager {
         [{ text: "📸 Medical Vision & Docs Guide" }, { text: "📋 Medical Menu" }],
         [{ text: "💊 Pharmacology MCQ" }, { text: "🫀 Anatomy / Physio MCQ" }],
         [{ text: "🔬 Pathology & Micro MCQ" }, { text: "🧬 Biochemistry MCQ" }],
-        [{ text: "🧹 Reset Memory" }],
+        [{ text: "🧹 Reset Memory" }, { text: "⚙️ Custom Prompt" }],
       ],
       resize_keyboard: true,
       persistent: true,
@@ -822,7 +828,8 @@ class TelegramBotManager {
   // Core Medical Content Generators
   public async generateClinicalMcq(
     subject: string = "general",
-    userPrompt: string = ""
+    userPrompt: string = "",
+    chatId?: number | string
   ): Promise<{ text: string; latencyMs: number }> {
     const subjectTitle =
       subject === "anatomy"
@@ -868,7 +875,7 @@ Requirements for each question:
     const result = await generateGeminiReply(
       prompt,
       [],
-      this.config.systemInstruction,
+      this.getSystemPrompt(chatId || ""),
       this.config.temperature,
       [],
       this.config.model
@@ -877,7 +884,7 @@ Requirements for each question:
     return result;
   }
 
-  public async generateExamTips(topic: string = "general"): Promise<{ text: string; latencyMs: number }> {
+  public async generateExamTips(topic: string = "general", chatId?: number | string): Promise<{ text: string; latencyMs: number }> {
     const prompt = topic === "mnemonics"
       ? `Provide 3 to 4 extremely high-yield, memorable medical mnemonics for medical students preparing for board exams (USMLE / NEET-PG / PLAB). Include mnemonics covering Pharmacology, Pathology, or Biochemistry with clinical context explaining what each letter or keyword represents and why it is commonly tested.`
       : topic === "strategy"
@@ -896,7 +903,7 @@ Include:
     const result = await generateGeminiReply(
       prompt,
       [],
-      this.config.systemInstruction,
+      this.getSystemPrompt(chatId || ""),
       this.config.temperature,
       [],
       this.config.model
@@ -1335,7 +1342,7 @@ CRITICAL INSTRUCTION: DO NOT generate or append any multiple-choice questions (M
       const { text: reply, latencyMs } = await generateGeminiReply(
         promptText,
         history,
-        this.config.systemInstruction,
+        this.getSystemPrompt(chatId),
         this.config.temperature,
         [{ mimeType: detectedMime, data: base64Data, fileName: fileName || "medical_image.jpg" }],
         this.config.model
@@ -1577,7 +1584,7 @@ Address the user's query with expert medical reasoning, quoting and synthesizing
       const { text: reply, latencyMs } = await generateGeminiReply(
         promptText,
         history,
-        this.config.systemInstruction,
+        this.getSystemPrompt(chatId),
         this.config.temperature,
         attachments,
         this.config.model
@@ -1819,7 +1826,7 @@ Include:
         const { text: notes } = await generateGeminiReply(
           prompt,
           [],
-          this.config.systemInstruction,
+          this.getSystemPrompt(chatId),
           this.config.temperature,
           [],
           this.config.model
@@ -2047,6 +2054,35 @@ Include:
       return;
     }
 
+    // Custom Prompt Handling
+    if (text === "⚙️ Custom Prompt" || text.startsWith("/setprompt")) {
+      const parts = text.split(" ");
+      if (text.startsWith("/setprompt") && parts.length > 1) {
+        const newPrompt = text.replace("/setprompt", "").trim();
+        this.customSystemPrompts.set(chatId, newPrompt);
+        this.userStates.delete(chatId);
+        await this.sendMessage(chatId, `✅ *Custom prompt updated!*\n\nYour new prompt:\n_${newPrompt}_\n\nTo revert, send /resetprompt`, "Markdown");
+      } else {
+        this.userStates.set(chatId, 'WAITING_FOR_PROMPT');
+        await this.sendMessage(chatId, "⚙️ *Set Custom Prompt*\n\nPlease reply to this message with your new system prompt (e.g., 'Act as a 1st-year anatomy tutor').\n\nTo return to normal, send /resetprompt.", "Markdown");
+      }
+      return;
+    }
+
+    if (text === "/resetprompt") {
+      this.customSystemPrompts.delete(chatId);
+      this.userStates.delete(chatId);
+      await this.sendMessage(chatId, "✅ *Prompt Reset*\n\nYour bot has returned to its normal (default) medical mode.", "Markdown");
+      return;
+    }
+
+    if (this.userStates.get(chatId) === 'WAITING_FOR_PROMPT') {
+      this.customSystemPrompts.set(chatId, text);
+      this.userStates.delete(chatId);
+      await this.sendMessage(chatId, `✅ *Custom prompt updated!*\n\nYour new prompt:\n_${text}_\n\nTo revert, send /resetprompt`, "Markdown");
+      return;
+    }
+
     // 6. Medical Image Search Request (e.g. "heart image", "send image of kidney", "/image lungs")
     // Strictly triggers ONLY when user explicitly asks for an image ("only when i say to do so")
     const imageReq = detectImageRequest(text);
@@ -2068,7 +2104,7 @@ Include:
       const { text: reply, latencyMs, modelUsed } = await generateGeminiReply(
         text,
         history,
-        this.config.systemInstruction,
+        this.getSystemPrompt(chatId),
         this.config.temperature,
         [],
         this.config.model
@@ -2167,7 +2203,7 @@ CRITICAL INSTRUCTION:
       const { text: explanation } = await generateGeminiReply(
         prompt,
         [],
-        this.config.systemInstruction,
+        this.getSystemPrompt(chatId),
         this.config.temperature,
         [],
         this.config.model
@@ -2336,7 +2372,7 @@ CRITICAL INSTRUCTION: DO NOT generate or attach any multiple-choice questions (M
     const { text: reply, latencyMs } = await generateGeminiReply(
       prompt,
       [],
-      this.config.systemInstruction,
+      this.getSystemPrompt(chatId),
       this.config.temperature,
       attachments,
       this.config.model
