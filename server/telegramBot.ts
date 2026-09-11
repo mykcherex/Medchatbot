@@ -913,6 +913,168 @@ Tap an option below or send your first medical question to begin!`;
     }
   }
 
+  // Automated Gemini-Powered PDF Compiler & Exporter
+  public async compileAndSendMedicalPdf(
+    chatId: number | string,
+    requestedTopic?: string,
+    fallbackText?: string
+  ): Promise<boolean> {
+    await this.sendChatAction(chatId, "upload_document");
+
+    const history = this.chatHistories.get(chatId) || [];
+    const lastBotResp = this.lastBotResponseByChat.get(chatId);
+    const lastModelTurn = [...history].reverse().find((t) => t.role === "model");
+    const lastUserTurn = [...history].reverse().find((t) => t.role === "user");
+
+    let cleanTopic = (requestedTopic || "").trim();
+    // Normalize if the topic is just a generic phrase or command
+    if (
+      !cleanTopic ||
+      /^(pdf|convert to pdf|make pdf|download pdf|export pdf|notes|this|it|previous response|last response|last message|notes pdf|download)$/i.test(cleanTopic)
+    ) {
+      cleanTopic = "";
+    }
+
+    // Determine the source content to compile
+    const sourceContent =
+      lastBotResp?.text ||
+      lastModelTurn?.text ||
+      fallbackText ||
+      "";
+
+    // Immediate progress notification
+    try {
+      await this.sendMessage(
+        chatId,
+        `⚙️ *Compiling Medical Study Guide into PDF...*\n_Google Gemini is structuring, expanding, and formatting high-yield clinical notes with clinical pearls & diagnostic tables..._`,
+        "Markdown"
+      );
+    } catch {}
+
+    await this.sendChatAction(chatId, "upload_document");
+
+    let geminiPrompt = "";
+    if (cleanTopic && cleanTopic.length > 2) {
+      // User asked for a specific medical subject
+      geminiPrompt = `You are an elite Medical Sciences Professor, Board-Examiner, and Medical Textbook Author.
+Generate an exhaustive, publication-grade, board-examination medical study & clinical review guide on: "${cleanTopic}".
+
+Include:
+# ${cleanTopic.toUpperCase()} — COMPREHENSIVE CLINICAL STUDY GUIDE
+
+## 1. Executive Clinical Summary & Pathophysiology
+• Core pathophysiological mechanisms, cellular pathology, and anatomical relations.
+• Cardinal clinical signs and classic presenting triad/symptoms.
+
+## 2. Diagnostic Workup & Gold Standard Criteria
+• First-line screening vs. confirmatory gold-standard diagnostic modalities.
+• Key laboratory findings, radiological hallmarks, and histopathological features.
+
+## 3. High-Yield Pharmacotherapy & Clinical Management
+• First-line drug regimens with exact mechanisms of action, major contraindications, and lethal adverse effects.
+• Acute resuscitation and chronic maintenance protocols.
+
+## 4. High-Yield Board Pearls & Exam Traps
+💡 Clinical Pearl: [Critical board exam fact often tested on USMLE/NCLEX/NEET-PG]
+🎯 Exam Trap / Distractor: [Common clinical error or tricky distractor in MCQs]
+💊 High-Yield Rx: [Key drug of choice or receptor mechanism]
+
+Ensure all content is academically rigorous, thorough, beautifully organized with markdown headers (#, ##, ###), bullets (•), and clinical callouts. Output ONLY the markdown document text.`;
+    } else if (sourceContent && sourceContent.length > 20) {
+      // Intelligently compile and enrich the previous bot response & user conversation context
+      geminiPrompt = `You are an elite Medical Sciences Professor and Clinical Document Editor.
+Your task is to take the previous medical consultation/discussion text below and COMPILE & ENRICH it into an exhaustive, publication-grade, beautifully structured Medical Study & Clinical Reference Guide for PDF export.
+
+PREVIOUS MEDICAL DISCUSSION / RESPONSE TO COMPILE:
+"""
+${sourceContent}
+"""
+
+${lastUserTurn ? `Context / User Question: "${lastUserTurn.text}"` : ""}
+
+STRUCTURAL INSTRUCTIONS:
+1. Provide a professional top-level title: "# [TOPIC NAME] — CLINICAL STUDY NOTES & BOARD REVIEW"
+2. Organize logically into distinct sections with ## and ### headings:
+   - ## 1. Clinical Overview & Core Pathophysiology
+   - ## 2. Diagnostic Algorithm & Key Laboratory Findings
+   - ## 3. Pharmacotherapy, First-Line Regimens & Clinical Management
+   - ## 4. High-Yield Board Pearls & Diagnostic Traps
+3. Expand on any abbreviated points so the PDF document is a complete, self-contained, authoritative medical study guide.
+4. Highlight critical facts using callout prefixes:
+   • 💡 Clinical Pearl: [High-yield board exam takeaway]
+   • 🎯 Exam Trap / Distractor: [Common diagnostic mistake or MCQ trap]
+   • 💊 High-Yield Rx: [Drug of choice & mechanism]
+5. Format diagnostic comparisons, steps, or drug options with clear bullet points (•) or Markdown tables.
+6. Output ONLY the publication-ready medical study notes in clean markdown. Do NOT include casual conversational greetings like "Sure! Here is your PDF".`;
+    } else {
+      geminiPrompt = `You are an elite Medical Sciences Professor. Generate a comprehensive, high-yield Medical Sciences Board Review Guide covering essential USMLE Step 1/2 CK topics (Cardiology, Pharmacology, Renal, and Pathology).
+Include:
+# USMLE & CLINICAL SCIENCES HIGH-YIELD REVIEW GUIDE
+## 1. High-Yield Cardiology & Hemodynamics
+## 2. High-Yield Pharmacology & Receptor Pharmacology
+## 3. High-Yield Renal & Acid-Base Physiology
+## 4. High-Yield Pathology & Board Pearls
+💡 Clinical Pearl: [High-yield facts]
+Output ONLY formatted markdown notes.`;
+    }
+
+    try {
+      const { text: compiledNotes } = await generateGeminiReply(
+        geminiPrompt,
+        [],
+        this.getSystemPrompt(chatId),
+        0.3,
+        [],
+        this.config.model
+      );
+
+      // Extract title from markdown
+      const titleMatch = compiledNotes.match(/^#\s+(.+)$/m);
+      const rawTitle = titleMatch ? titleMatch[1].replace(/—.*$/, "").trim() : cleanTopic || lastBotResp?.topic || "Medchat Clinical Notes";
+      const docTitle = rawTitle.slice(0, 45);
+      const docTopic = cleanTopic || lastBotResp?.topic || "Medical Sciences Review";
+
+      const pdfBuffer = await generateMedicalPdf(compiledNotes, {
+        title: docTitle,
+        topic: `${docTopic} • Board Review & Clinical Education`,
+        author: "Medchat AI (Powered by Google Gemini)",
+      });
+
+      const safeFileName = `${(docTitle || "Medchat_Notes").replace(/[^a-zA-Z0-9]/g, "_").slice(0, 30)}.pdf`;
+      const caption = `🩺 *${docTitle}*\n📄 High-yield clinical study guide compiled automatically by Google Gemini from your medical review.`;
+
+      const sent = await this.sendDocument(
+        chatId,
+        pdfBuffer,
+        safeFileName,
+        caption
+      );
+
+      if (!sent) {
+        await this.sendMessage(chatId, "⚠️ Could not deliver PDF document. Please try again.");
+        return false;
+      }
+
+      this.logActivity({
+        id: `pdf-gen-${Date.now()}`,
+        chatId,
+        userName: "Student",
+        userMessage: requestedTopic ? `/pdf ${requestedTopic}` : "/pdf (Gemini compiled response)",
+        aiResponse: `[Generated PDF Document: ${safeFileName}]`,
+        latencyMs: 1500,
+        timestamp: new Date().toISOString(),
+        status: 'success',
+        source: 'telegram',
+      });
+
+      return true;
+    } catch (err: any) {
+      console.error("[Telegram] PDF compilation error:", err);
+      await this.sendMessage(chatId, `⚠️ Could not compile PDF document: ${err.message || "Unknown error"}. Please try again.`);
+      return false;
+    }
+  }
+
   // Telegram Keyboards
   public getMainInlineKeyboard() {
     return {
@@ -1371,17 +1533,7 @@ CRITICAL CONSTRAINTS:
           source: 'telegram',
         });
       } else if (data === "action_export_pdf") {
-        await this.sendChatAction(chatId, "upload_document");
-        const history = this.chatHistories.get(chatId) || [];
-        const lastModelMsg = [...history].reverse().find((t) => t.role === "model");
-        const contentToConvert = lastModelMsg?.text || `# Medchat Medical Study Notes\n\nHigh-Yield Medical Sciences review compiled by Medchat AI.\n\n## Core Board Review Topics\n* High-yield pathology and pharmacology\n* Interactive USMLE quiz questions\n* Clinical vignettes & active recall`;
-
-        const pdfBuffer = await generateMedicalPdf(contentToConvert, {
-          title: "Medchat Clinical Notes",
-          topic: "Medical Sciences Board Review",
-        });
-
-        await this.sendDocument(chatId, pdfBuffer, "Medchat_Notes.pdf", "🩺 Here are your downloadable Medchat clinical notes in PDF format.");
+        await this.compileAndSendMedicalPdf(chatId);
       } else if (data.startsWith("action_mcq_")) {
         const subject = data.replace("action_mcq_", "");
         const cleanSubject = subject === "random" ? "medical sciences" : subject;
@@ -2242,80 +2394,22 @@ Medchat is equipped with multimodal perception powered by Google Gemini!
       return;
     }
 
-    // 3. PDF Conversion and Download Requests
+    // 3. PDF Conversion and Download Requests (Gemini-Powered)
     const isPdfRequest =
       text.startsWith("/pdf") ||
       text.startsWith("/download") ||
       text === "📄 Download Notes PDF" ||
       text === "📄 Export PDF Notes" ||
-      /\b(pdf|convert to pdf|download as pdf|download pdf|save as pdf|export pdf|send pdf|make pdf)\b/i.test(text);
+      /\b(pdf|convert to pdf|download as pdf|download pdf|save as pdf|export pdf|send pdf|make pdf|make a pdf|create pdf|create a pdf|generate pdf|generate a pdf|compile (?:to|into|as)? pdf|give me (?:a\s+)?pdf)\b/i.test(text);
 
     if (isPdfRequest) {
-      await this.sendChatAction(chatId, "upload_document");
-
       let topic = text
-        .replace(/^\/pdf\s*/i, "")
-        .replace(/^\/download\s*/i, "")
-        .replace(/^(convert|download|save|send|make|export)\s+(to\s+|as\s+)?pdf\s*(of\s*)?/i, "")
+        .replace(/^\/(?:pdf|download)\s*/i, "")
+        .replace(/^(?:can\s+you\s+)?(?:please\s+)?(?:convert|download|save|send|make|create|generate|compile|export)\s+(?:this\s+|it\s+|last\s+response\s+|previous\s+response\s+)?(?:to\s+|as\s+|into\s+)?(?:a\s+)?pdf\s*(?:of\s+|about\s+|on\s+)?/i, "")
+        .replace(/\b(?:as\s+|in\s+)?pdf\b/gi, "")
         .trim();
 
-      let contentToConvert = "";
-
-      const lastBotResp = this.lastBotResponseByChat.get(chatId);
-      const history = this.chatHistories.get(chatId) || [];
-      const lastModelMsg = [...history].reverse().find((t) => t.role === "model");
-
-      if (topic.length > 2 && !topic.toLowerCase().includes("pdf")) {
-        // User asked for notes on a specific topic: generate comprehensive notes
-        const prompt = `Provide an elite, comprehensive, board-level clinical study guide on "${topic}".
-Include:
-1. 📋 Overview & Core Pathophysiology
-2. 🔍 Diagnostic Hallmarks & Gold Standard Testing
-3. 💊 First-Line Pharmacotherapy & Management
-4. 💡 High-Yield Board Pearls & Exam Mnemonics`;
-
-        const { text: notes } = await generateGeminiReply(
-          prompt,
-          [],
-          this.getSystemPrompt(chatId),
-          this.config.temperature,
-          [],
-          this.config.model
-        );
-        contentToConvert = notes;
-      } else if (lastBotResp && lastBotResp.text) {
-        // Automatically compile the text in just previous response (previous last response)
-        contentToConvert = lastBotResp.text;
-        topic = lastBotResp.topic || "Clinical Notes";
-      } else if (lastModelMsg && lastModelMsg.text) {
-        contentToConvert = lastModelMsg.text;
-        topic = "Clinical Notes";
-      } else {
-        contentToConvert = `# Medchat Medical Sciences Study Guide\n\nWelcome to Medchat! Here is your high-yield reference guide for USMLE and board examinations.\n\n## High-Yield Medical Specialties\n* **Anatomy & Embryology:** Cranial nerves, branchial arches, coronary anatomy.\n* **Physiology:** Frank-Starling curve, acid-base nomogram, nephron transport.\n* **Pharmacology:** Autonomic nervous system receptors, antiarrhythmics, antibiotics.\n* **Pathology:** Glomerulonephritides, leukemias, cardiac murmurs.\n\n💡 Tip: Ask Medchat any clinical question or send an anatomical image or PDF document, then type /pdf to download notes in PDF format!`;
-        topic = "General Medical Review";
-      }
-
-      try {
-        const pdfBuffer = await generateMedicalPdf(contentToConvert, {
-          title: topic.length > 2 ? `Medchat: ${topic}` : "Medchat Clinical Notes",
-          topic: topic || "Medical Sciences Review",
-        });
-
-        const safeFileName = `${(topic || "Medchat_Notes").replace(/[^a-zA-Z0-9]/g, "_").slice(0, 30)}.pdf`;
-        const sent = await this.sendDocument(
-          chatId,
-          pdfBuffer,
-          safeFileName,
-          `🩺 *Medchat Clinical Notes (${topic})*\nDownloaded from Medchat AI.`
-        );
-
-        if (!sent) {
-          await this.sendMessage(chatId, "⚠️ Could not deliver PDF document. Please try again.");
-        }
-      } catch (err: any) {
-        console.error("[Telegram] PDF generation error:", err);
-        await this.sendMessage(chatId, "⚠️ Error generating PDF document. Please try again.");
-      }
+      await this.compileAndSendMedicalPdf(chatId, topic);
       return;
     }
 

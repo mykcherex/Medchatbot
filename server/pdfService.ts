@@ -32,7 +32,7 @@ export async function generateMedicalPdf(
         size: 'A4',
         info: {
           Title: options.title || 'Medchat Clinical Notes',
-          Author: options.author || 'Medchat Medical AI',
+          Author: options.author || 'Medchat Medical AI (Powered by Google Gemini)',
           Subject: options.topic || 'Medical Sciences & Clinical Education',
           Keywords: 'Medical, USMLE, Physiology, Anatomy, Pharmacology, Pathology, Board Review',
         },
@@ -67,31 +67,30 @@ export async function generateMedicalPdf(
       // Document Main Title
       doc
         .font('Helvetica-Bold')
-        .fontSize(20)
+        .fontSize(18)
         .fillColor('#0f172a')
         .text(title, 50, 74, { width: 495 });
 
       // Subtitle / Topic
       doc
         .font('Helvetica')
-        .fontSize(10)
+        .fontSize(9.5)
         .fillColor('#64748b')
-        .text(`${topic} • Date: ${dateStr} • Powered by Google Gemini`, 50, 102, { width: 495 });
+        .text(`${topic} • Date: ${dateStr} • Powered by Google Gemini`, 50, 98, { width: 495 });
 
       // Divider Line
-      doc.moveTo(50, 122).lineTo(545, 122).strokeColor('#e2e8f0').lineWidth(1).stroke();
-      doc.y = 135;
+      doc.moveTo(50, 115).lineTo(545, 115).strokeColor('#e2e8f0').lineWidth(1).stroke();
+      doc.y = 128;
 
       // --- Content Parsing & Rendering ---
       const lines = rawText.split('\n');
-      let inPearlBox = false;
 
       for (let i = 0; i < lines.length; i++) {
         const rawLine = lines[i];
         const trimmed = rawLine.trim();
 
         // Check page overflow
-        if (doc.y > 740) {
+        if (doc.y > 730) {
           doc.addPage();
           // Header on subsequent pages
           doc.rect(50, 40, 495, 2).fill('#0f766e');
@@ -100,59 +99,90 @@ export async function generateMedicalPdf(
             .fontSize(8)
             .fillColor('#94a3b8')
             .text(`Medchat Medical Notes — ${title}`, 50, 48, { width: 495, align: 'left' });
-          doc.moveTo(50, 60).lineTo(545, 60).strokeColor('#e2e8f0').lineWidth(0.5).stroke();
-          doc.y = 75;
+          doc.moveTo(50, 58).lineTo(545, 58).strokeColor('#e2e8f0').lineWidth(0.5).stroke();
+          doc.y = 70;
         }
 
         if (!trimmed) {
-          doc.moveDown(0.4);
+          doc.moveDown(0.35);
           continue;
         }
 
         // Section Dividers (--- or ***)
         if (/^(\-\-\-|\*\*\*|___)$/.test(trimmed)) {
-          doc.moveDown(0.5);
+          doc.moveDown(0.4);
           doc.moveTo(50, doc.y).lineTo(545, doc.y).strokeColor('#cbd5e1').lineWidth(0.8).stroke();
-          doc.moveDown(0.6);
+          doc.moveDown(0.5);
           continue;
+        }
+
+        // Ignore Table delimiter lines like |---|---|
+        if (/^\|?(\s*:?-+:?\s*\|)+\s*$/.test(trimmed)) {
+          continue;
+        }
+
+        // Table Rows (| col1 | col2 | col3 |)
+        if (trimmed.startsWith('|') && trimmed.endsWith('|')) {
+          const cells = trimmed
+            .split('|')
+            .map((c) => cleanMarkdownLine(c.trim()))
+            .filter((c, idx, arr) => idx > 0 && idx < arr.length - 1);
+
+          if (cells.length > 0) {
+            const startY = doc.y;
+            const colWidth = 495 / cells.length;
+            doc.rect(50, startY, 495, 18).fill('#f8fafc');
+
+            cells.forEach((cell, idx) => {
+              doc
+                .font(i > 0 && lines[i - 1].includes('---') ? 'Helvetica' : 'Helvetica-Bold')
+                .fontSize(8.5)
+                .fillColor('#1e293b')
+                .text(cell, 55 + idx * colWidth, startY + 4, { width: colWidth - 8, lineBreak: false });
+            });
+
+            doc.moveTo(50, startY + 18).lineTo(545, startY + 18).strokeColor('#e2e8f0').lineWidth(0.5).stroke();
+            doc.y = startY + 22;
+            continue;
+          }
         }
 
         // H1 Heading (# Heading)
         if (trimmed.startsWith('# ') && !trimmed.startsWith('## ')) {
           const headingText = cleanMarkdownLine(trimmed.replace(/^#\s+/, ''));
-          doc.moveDown(0.8);
+          doc.moveDown(0.7);
           doc
             .font('Helvetica-Bold')
-            .fontSize(15)
+            .fontSize(14)
             .fillColor('#0f766e')
             .text(headingText, { width: 495 });
-          doc.moveDown(0.3);
+          doc.moveDown(0.25);
           continue;
         }
 
         // H2 Heading (## Heading)
         if (trimmed.startsWith('## ') && !trimmed.startsWith('### ')) {
           const headingText = cleanMarkdownLine(trimmed.replace(/^##\s+/, ''));
-          doc.moveDown(0.7);
+          doc.moveDown(0.6);
           doc
             .font('Helvetica-Bold')
-            .fontSize(13)
+            .fontSize(12)
             .fillColor('#1e293b')
             .text(headingText, { width: 495 });
-          doc.moveDown(0.25);
+          doc.moveDown(0.2);
           continue;
         }
 
         // H3 Heading (### Heading)
         if (trimmed.startsWith('### ')) {
           const headingText = cleanMarkdownLine(trimmed.replace(/^###\s+/, ''));
-          doc.moveDown(0.5);
+          doc.moveDown(0.45);
           doc
             .font('Helvetica-Bold')
-            .fontSize(11)
+            .fontSize(10.5)
             .fillColor('#334155')
             .text(headingText, { width: 495 });
-          doc.moveDown(0.2);
+          doc.moveDown(0.15);
           continue;
         }
 
@@ -161,47 +191,53 @@ export async function generateMedicalPdf(
           trimmed.includes('Clinical Pearl') ||
           trimmed.includes('High-Yield') ||
           trimmed.includes('Mnemonic') ||
+          trimmed.includes('Exam Trap') ||
           trimmed.startsWith('💡') ||
           trimmed.startsWith('🎯') ||
+          trimmed.startsWith('💊') ||
           trimmed.startsWith('🩺');
 
         if (isPearl) {
           const pearlText = cleanMarkdownLine(trimmed);
           const startY = doc.y;
-          doc.moveDown(0.3);
+          doc.moveDown(0.25);
+
+          // Background light container
+          const textHeight = doc.heightOfString(pearlText, { width: 470 });
+          doc.rect(50, startY, 495, Math.max(textHeight + 10, 20)).fill('#f0fdfa');
 
           // Draw left accent border
+          doc.rect(50, startY, 3.5, Math.max(textHeight + 10, 20)).fill('#0d9488');
+
           doc
             .font('Helvetica-Bold')
-            .fontSize(10)
+            .fontSize(9)
             .fillColor('#0f766e')
-            .text(pearlText, 62, doc.y, { width: 475, lineGap: 2 });
+            .text(pearlText, 60, startY + 5, { width: 470, lineGap: 2 });
 
-          const endY = doc.y;
-          doc.rect(52, startY + 2, 3, Math.max(endY - startY, 14)).fill('#0d9488');
           doc.x = 50;
-          doc.moveDown(0.4);
+          doc.y = startY + Math.max(textHeight + 10, 20) + 6;
           continue;
         }
 
-        // Bullet Points (*, -, •)
+        // Bullet Points (*, -, •, or 1.)
         if (/^[\*\-•]\s+/.test(trimmed) || /^\d+[\.\)]\s+/.test(trimmed)) {
           const isNumbered = /^\d+[\.\)]\s+/.test(trimmed);
           const bulletPrefix = isNumbered ? trimmed.match(/^\d+[\.\)]\s+/)?.[0] || '• ' : '• ';
           const bulletContent = cleanMarkdownLine(trimmed.replace(/^([\*\-•]|\d+[\.\)])\s+/, ''));
 
+          const startY = doc.y;
           doc
             .font('Helvetica-Bold')
             .fontSize(9.5)
             .fillColor('#0f766e')
-            .text(bulletPrefix, 58, doc.y, { width: 22, continued: false });
+            .text(bulletPrefix, 56, startY, { width: 20, continued: false });
 
-          // Subtract back to align with text
           doc
             .font('Helvetica')
             .fontSize(9.5)
             .fillColor('#334155')
-            .text(bulletContent, 80, doc.y - 11, { width: 460, lineGap: 2.5 });
+            .text(bulletContent, 76, startY, { width: 465, lineGap: 2.5 });
 
           doc.x = 50;
           doc.moveDown(0.2);
@@ -215,7 +251,7 @@ export async function generateMedicalPdf(
           .fontSize(9.5)
           .fillColor('#334155')
           .text(cleanBody, 50, doc.y, { width: 495, lineGap: 2.5, align: 'left' });
-        doc.moveDown(0.3);
+        doc.moveDown(0.25);
       }
 
       // --- Footer ---
@@ -240,3 +276,4 @@ export async function generateMedicalPdf(
     }
   });
 }
+
