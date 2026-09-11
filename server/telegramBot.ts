@@ -1714,7 +1714,7 @@ I am *Medchat*, your specialized Medical Sciences & Board Exam AI Professor powe
 • Request 2-5 medical diagrams anytime by typing e.g. \`heart image\`, \`lungs images\`, \`send kidney images\`!
 • Questions & clinical MCQs are generated strictly when you ask for them (e.g. \`/mcq\` or \`question on heart failure\`).`;
 
-      await this.sendMessage(chatId, welcome, "Markdown", { remove_keyboard: true });
+      await this.sendMessage(chatId, welcome, "Markdown", this.getPersistentReplyKeyboard());
 
       this.logActivity({
         id: `msg-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
