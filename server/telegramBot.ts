@@ -1030,7 +1030,11 @@ Include:
 
     const prompt = `Generate exactly ${count} distinct, high-yield, interactive multiple-choice quiz questions specifically testing "${topic}". ${focus}
 
-USER INTENT & SCENARIO RULE:
+USER INTENT & CUSTOM INSTRUCTIONS:
+The user specifically requested: "${userPrompt}"
+CRITICAL: You MUST strictly adapt the difficulty, style, and specific focus to perfectly match what the user requested above. If they asked for hard questions, make them extremely challenging. If they asked for a specific topic, only focus on that.
+
+SCENARIO RULE:
 ${scenarioDirective}
 
 Respond ONLY with a valid JSON array containing exactly ${count} object(s), with NO markdown formatting, NO backticks, and NO surrounding text:
@@ -1460,11 +1464,24 @@ CRITICAL INSTRUCTION: DO NOT generate or append any multiple-choice questions (M
     if (userWantsQuestion) {
       await this.sendMessage(chatId, `🎯 *Generating interactive quiz polls based on your uploaded document (${fileName})...*`, "Markdown");
       try {
+        let requestedCount = 5;
+        if (caption) {
+          const parsed = parseQuizPrompt(caption);
+          if (parsed.count !== 1) {
+            requestedCount = parsed.count;
+          } else {
+            const numMatch = caption.match(/\b(\d+)\b/);
+            if (numMatch && parseInt(numMatch[1], 10) > 0 && parseInt(numMatch[1], 10) <= 50) {
+              requestedCount = parseInt(numMatch[1], 10);
+            }
+          }
+        }
+
         const docAttachments: MediaAttachment[] = isPdf ? [{ mimeType: "application/pdf", data: fileBuffer.toString("base64"), fileName }] : [];
         const { quizzes, textSummary } = await this.generateInteractiveQuizzes(
           caption || `Quiz on ${fileName}`,
           fileName.replace(/\.[^/.]+$/, ""),
-          5,
+          requestedCount,
           docAttachments
         );
 
