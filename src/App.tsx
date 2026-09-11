@@ -7,13 +7,14 @@ import { ActivityLogs } from './components/ActivityLogs';
 import { BotSettings } from './components/BotSettings';
 import { InstructionEditor } from './components/InstructionEditor';
 import { TelegramGuide } from './components/TelegramGuide';
-import { Activity, Settings, HelpCircle, AlertTriangle, RefreshCw, Send, Sparkles } from 'lucide-react';
+import { AccessControlManager } from './components/AccessControlManager';
+import { Activity, Settings, HelpCircle, AlertTriangle, RefreshCw, Send, Sparkles, ShieldCheck } from 'lucide-react';
 
 export default function App() {
   const [status, setStatus] = useState<BotStatusResponse | null>(null);
   const [logs, setLogs] = useState<MessageLog[]>([]);
   const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState<'monitor' | 'instructions' | 'settings' | 'guide'>('monitor');
+  const [activeTab, setActiveTab] = useState<'monitor' | 'instructions' | 'access' | 'settings' | 'guide'>('monitor');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   const fetchStatus = useCallback(async () => {
@@ -190,6 +191,19 @@ export default function App() {
             </button>
 
             <button
+              id="tab-access-btn"
+              onClick={() => setActiveTab('access')}
+              className={`flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-xs sm:text-sm font-semibold transition-all cursor-pointer ${
+                activeTab === 'access'
+                  ? 'bg-teal-700 text-white shadow-xs'
+                  : 'text-slate-600 hover:text-slate-900 hover:bg-slate-200/60'
+              }`}
+            >
+              <ShieldCheck className="w-4 h-4" />
+              <span>Access Control & Whitelist</span>
+            </button>
+
+            <button
               id="tab-settings-btn"
               onClick={() => setActiveTab('settings')}
               className={`flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-xs sm:text-sm font-semibold transition-all cursor-pointer ${
@@ -242,7 +256,12 @@ export default function App() {
           />
         )}
 
-        {/* Tab 3: Persona & Engine Settings */}
+        {/* Tab 3: Access Control & Whitelist (Option 3) */}
+        {activeTab === 'access' && (
+          <AccessControlManager />
+        )}
+
+        {/* Tab 4: Persona & Engine Settings */}
         {activeTab === 'settings' && status && (
           <BotSettings
             config={status.config}

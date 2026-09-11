@@ -166,6 +166,52 @@ async function startServer() {
     res.json({ ok: sent });
   });
 
+  // Access Control & Whitelist API Routes
+  app.get("/api/access-control", (req, res) => {
+    res.json(telegramBot.getAccessControlStatus());
+  });
+
+  app.post("/api/access-control/approve", async (req, res) => {
+    try {
+      const { identifier, approvedBy } = req.body;
+      if (!identifier) {
+        return res.status(400).json({ error: "Identifier (Username or Chat ID) is required" });
+      }
+      const result = await telegramBot.approveUser(identifier, approvedBy || "Web Dashboard");
+      res.json(result);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message || "Failed to approve user" });
+    }
+  });
+
+  app.post("/api/access-control/revoke", async (req, res) => {
+    try {
+      const { identifier } = req.body;
+      if (!identifier) {
+        return res.status(400).json({ error: "Identifier (Username or Chat ID) is required" });
+      }
+      const result = await telegramBot.revokeUser(identifier);
+      res.json(result);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message || "Failed to revoke user" });
+    }
+  });
+
+  app.post("/api/access-control/toggle", (req, res) => {
+    const { enabled } = req.body;
+    telegramBot.setAccessControlEnabled(Boolean(enabled));
+    res.json({ ok: true, status: telegramBot.getAccessControlStatus() });
+  });
+
+  app.post("/api/access-control/add-admin", (req, res) => {
+    const { identifier } = req.body;
+    if (!identifier) {
+      return res.status(400).json({ error: "Admin identifier is required" });
+    }
+    const ok = telegramBot.addAdmin(identifier);
+    res.json({ ok, status: telegramBot.getAccessControlStatus() });
+  });
+
   // Telegram incoming Webhook endpoint
   app.post("/api/telegram/webhook", async (req, res) => {
     // Acknowledge update immediately to Telegram (HTTP 200)

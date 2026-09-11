@@ -118,6 +118,22 @@ export interface MessageLogEntry {
   fileName?: string;
 }
 
+export interface AuthorizedUser {
+  chatId: number | string;
+  username?: string;
+  name?: string;
+  approvedAt: string;
+  approvedBy?: string;
+}
+
+export interface PendingUserRequest {
+  chatId: number | string;
+  username?: string;
+  name?: string;
+  requestedAt: string;
+  lastMessage?: string;
+}
+
 export const DEFAULT_MEDICAL_PROMPT = `You are Medchat, an elite Medical Sciences Professor, Board-Examiner (USMLE Step 1 & 2 CK, NEET-PG, PLAB, NCLEX), and Clinical Educator powered by Google Gemini.
 
 SPECIALTY SCOPE:
@@ -216,6 +232,15 @@ class TelegramBotManager {
   private totalLatencySum: number = 0;
   private totalLatencyCount: number = 0;
 
+  // Access Control & Whitelist State (Option 3)
+  private accessControlEnabled: boolean = true;
+  private adminChatIds: Set<number | string> = new Set();
+  private adminUsernames: Set<string> = new Set();
+  private approvedUsers: Map<number | string, AuthorizedUser> = new Map();
+  private approvedUsernames: Set<string> = new Set();
+  private pendingRequests: Map<number | string, PendingUserRequest> = new Map();
+  private adminSecret: string = process.env.ADMIN_SECRET || "medadmin2026";
+
   private config = {
     systemInstruction: DEFAULT_MEDICAL_PROMPT,
     temperature: 0.4,
@@ -242,10 +267,167 @@ class TelegramBotManager {
 
   constructor() {
     this.token = process.env.TELEGRAM_BOT_TOKEN || "8862664585:AAFVFulDGYrS_pPdfcFH-peILkbHZVi-84A";
+
+    if (process.env.ADMIN_TELEGRAM_ID) {
+      process.env.ADMIN_TELEGRAM_ID.split(",").map(s => s.trim()).filter(Boolean).forEach(id => {
+        const num = Number(id);
+        this.adminChatIds.add(!isNaN(num) ? num : id);
+      });
+    }
+
+    if (process.env.ADMIN_USERNAME) {
+      process.env.ADMIN_USERNAME.split(",").map(s => s.trim().replace(/^@/, '').toLowerCase()).filter(Boolean).forEach(u => {
+        this.adminUsernames.add(u);
+      });
+    }
   }
 
   public getApiBase(): string {
     return `https://api.telegram.org/bot${this.token}`;
+  }
+
+  public isAdmin(chatId: number | string, username?: string): boolean {
+    if (this.adminChatIds.has(chatId)) return true;
+    if (username && this.adminUsernames.has(username.replace(/^@/, '').toLowerCase())) return true;
+    return false;
+  }
+
+  public isAuthorized(chatId: number | string, username?: string): boolean {
+    if (!this.accessControlEnabled) return true;
+    if (this.isAdmin(chatId, username)) return true;
+    if (this.approvedUsers.has(chatId)) return true;
+    if (username && this.approvedUsernames.has(username.replace(/^@/, '').toLowerCase())) return true;
+    return false;
+  }
+
+  public async approveUser(identifier: number | string, approvedByName: string = "Administrator"): Promise<{ ok: boolean; message: string; targetChatId?: number | string }> {
+    const raw = String(identifier).trim();
+    let targetChatId: number | string | undefined;
+    let targetUsername: string | undefined;
+    let targetName: string | undefined;
+
+    // Search in pending requests
+    for (const [cId, req] of this.pendingRequests.entries()) {
+      const matchChatId = String(cId) === raw;
+      const matchUsername = req.username && req.username.replace(/^@/, '').toLowerCase() === raw.replace(/^@/, '').toLowerCase();
+      if (matchChatId || matchUsername) {
+        targetChatId = cId;
+        targetUsername = req.username;
+        targetName = req.name;
+        this.pendingRequests.delete(cId);
+        break;
+      }
+    }
+
+    if (!targetChatId) {
+      if (raw.startsWith("@") || isNaN(Number(raw))) {
+        targetUsername = raw.replace(/^@/, '');
+        this.approvedUsernames.add(targetUsername.toLowerCase());
+      } else {
+        targetChatId = Number(raw);
+      }
+    }
+
+    if (targetChatId) {
+      this.approvedUsers.set(targetChatId, {
+        chatId: targetChatId,
+        username: targetUsername,
+        name: targetName || "Student",
+        approvedAt: new Date().toISOString(),
+        approvedBy: approvedByName,
+      });
+      if (targetUsername) {
+        this.approvedUsernames.add(targetUsername.replace(/^@/, '').toLowerCase());
+      }
+
+      // Notify student in Telegram
+      try {
+        const welcomeMsg = `🎉 *Access Approved!*
+
+Welcome to *Medchat Medical AI*. Your access has been approved by the administrator.
+
+📚 *You can now use all features:*
+• Ask any medical science or clinical question
+• Generate Board-level practice MCQs (\`/mcq\`)
+• Analyze histology slides & radiology images
+• Download PDF study notes (\`/pdf\`)
+
+Tap an option below or send your first medical question to begin!`;
+        await this.sendMessage(targetChatId, welcomeMsg, "Markdown", this.getPersistentReplyKeyboard());
+      } catch (err) {
+        console.warn(`[Telegram] Could not notify user ${targetChatId}:`, err);
+      }
+    }
+
+    return {
+      ok: true,
+      message: `User ${targetUsername ? '@' + targetUsername : targetChatId} successfully approved!`,
+      targetChatId,
+    };
+  }
+
+  public async revokeUser(identifier: number | string): Promise<{ ok: boolean; message: string }> {
+    const raw = String(identifier).trim();
+    let removed = false;
+
+    for (const [cId, user] of this.approvedUsers.entries()) {
+      const matchChatId = String(cId) === raw;
+      const matchUsername = user.username && user.username.replace(/^@/, '').toLowerCase() === raw.replace(/^@/, '').toLowerCase();
+      if (matchChatId || matchUsername) {
+        this.approvedUsers.delete(cId);
+        if (user.username) {
+          this.approvedUsernames.delete(user.username.replace(/^@/, '').toLowerCase());
+        }
+        removed = true;
+        try {
+          await this.sendMessage(cId, "⚠️ *Access Revoked*\n\nYour access to Medchat has been revoked by the administrator.", "Markdown");
+        } catch {}
+        break;
+      }
+    }
+
+    if (!removed && (raw.startsWith("@") || isNaN(Number(raw)))) {
+      const cleanUser = raw.replace(/^@/, '').toLowerCase();
+      if (this.approvedUsernames.has(cleanUser)) {
+        this.approvedUsernames.delete(cleanUser);
+        removed = true;
+      }
+    }
+
+    return {
+      ok: true,
+      message: removed ? `Access revoked for ${raw}.` : `User ${raw} was not found in approved list.`,
+    };
+  }
+
+  public getAccessControlStatus() {
+    return {
+      accessControlEnabled: this.accessControlEnabled,
+      adminSecretSet: Boolean(this.adminSecret),
+      adminsCount: this.adminChatIds.size + this.adminUsernames.size,
+      admins: [
+        ...Array.from(this.adminChatIds).map(id => ({ type: 'chatId', value: String(id) })),
+        ...Array.from(this.adminUsernames).map(u => ({ type: 'username', value: `@${u}` })),
+      ],
+      approvedUsers: Array.from(this.approvedUsers.values()),
+      approvedUsernames: Array.from(this.approvedUsernames),
+      pendingRequests: Array.from(this.pendingRequests.values()),
+    };
+  }
+
+  public setAccessControlEnabled(enabled: boolean) {
+    this.accessControlEnabled = enabled;
+  }
+
+  public addAdmin(identifier: number | string): boolean {
+    const raw = String(identifier).trim();
+    if (raw.startsWith("@") || isNaN(Number(raw))) {
+      this.adminUsernames.add(raw.replace(/^@/, '').toLowerCase());
+      return true;
+    } else {
+      this.adminChatIds.add(Number(raw));
+      return true;
+    }
   }
 
   private getSystemPrompt(chatId: number | string): string {
@@ -1110,9 +1292,50 @@ CRITICAL CONSTRAINTS:
     const chatId = callbackQuery.message?.chat?.id;
     const fromUser = callbackQuery.from || {};
     const userName = fromUser.first_name || "Doctor / Student";
+    const userHandle = fromUser.username ? `@${fromUser.username}` : undefined;
 
     if (!chatId) {
       await this.answerCallbackQuery(queryId, "Action received");
+      return;
+    }
+
+    // 1. Handle Admin Approval / Denial Callbacks
+    if (data.startsWith("auth_approve_")) {
+      const targetChatId = data.replace("auth_approve_", "");
+      const adminHandle = userHandle || userName;
+
+      // Auto-claim admin if no admin is set yet
+      if (this.adminChatIds.size === 0 && this.adminUsernames.size === 0) {
+        this.adminChatIds.add(chatId);
+        if (fromUser.username) this.adminUsernames.add(fromUser.username.toLowerCase());
+      }
+
+      if (!this.isAdmin(chatId, fromUser.username)) {
+        await this.answerCallbackQuery(queryId, "⚠️ Only administrators can approve users.");
+        return;
+      }
+
+      const res = await this.approveUser(targetChatId, adminHandle);
+      await this.answerCallbackQuery(queryId, `✅ Approved user!`);
+      await this.sendMessage(chatId, `✅ *Approval Processed:*\n\n${res.message}`, "Markdown");
+      return;
+    }
+
+    if (data.startsWith("auth_deny_")) {
+      const targetChatId = data.replace("auth_deny_", "");
+      if (!this.isAdmin(chatId, fromUser.username) && (this.adminChatIds.size > 0 || this.adminUsernames.size > 0)) {
+        await this.answerCallbackQuery(queryId, "⚠️ Only administrators can deny requests.");
+        return;
+      }
+      this.pendingRequests.delete(targetChatId);
+      await this.answerCallbackQuery(queryId, `❌ Access request denied.`);
+      await this.sendMessage(chatId, `❌ Request for ID \`${targetChatId}\` was dismissed.`, "Markdown");
+      return;
+    }
+
+    // 2. Authorization check for other callback actions
+    if (!this.isAuthorized(chatId, fromUser.username)) {
+      await this.answerCallbackQuery(queryId, "🔒 Access restricted. Please request access from the admin.");
       return;
     }
 
@@ -1659,6 +1882,240 @@ Address the user's query with expert medical reasoning, quoting and synthesizing
     const sender = message.from || {};
     const userName = sender.first_name ? `${sender.first_name}${sender.last_name ? ' ' + sender.last_name : ''}` : "Medical Student";
     const userHandle = sender.username ? `@${sender.username}` : undefined;
+    const text = (message.text || "").trim();
+
+    // 0. Superadmin claim command (/claimadmin <passcode> or /adminlogin <passcode>)
+    if (text.startsWith("/claimadmin") || text.startsWith("/adminlogin")) {
+      const parts = text.split(" ");
+      const secret = parts[1]?.trim();
+      const isFirstAdmin = this.adminChatIds.size === 0 && this.adminUsernames.size === 0;
+
+      if (!secret && !isFirstAdmin) {
+        await this.sendMessage(chatId, "⚠️ *Admin Access*\n\nPlease provide the admin passcode:\n`/claimadmin <passcode>`", "Markdown");
+        return;
+      }
+
+      if (secret === this.adminSecret || isFirstAdmin) {
+        this.adminChatIds.add(chatId);
+        if (sender.username) this.adminUsernames.add(sender.username.toLowerCase());
+        this.approvedUsers.set(chatId, {
+          chatId,
+          username: userHandle,
+          name: userName,
+          approvedAt: new Date().toISOString(),
+          approvedBy: "Self (Admin Claim)",
+        });
+
+        const adminWelcome = `👑 *Admin Privileges Activated!*
+
+Welcome, *${userName}*! You are registered as an Administrator for Medchat.
+
+🛡️ *Your Admin Command Center:*
+• \`/approve <@username or ID>\` - Approve a waiting student
+• \`/revoke <@username or ID>\` - Revoke student access
+• \`/pending\` - View and 1-click approve pending requests
+• \`/users\` or \`/whitelist\` - List all authorized students
+• \`/broadcast <message>\` - Send announcement to all students
+• \`/toggleauth\` - Toggle private mode ON/OFF
+• \`/admin\` - View admin command reference
+
+_You will also receive instant interactive alerts whenever a new student requests access._`;
+
+        await this.sendMessage(chatId, adminWelcome, "Markdown", this.getPersistentReplyKeyboard());
+        return;
+      } else {
+        await this.sendMessage(chatId, "❌ Incorrect admin passcode.", "Markdown");
+        return;
+      }
+    }
+
+    // Check authorization status
+    const isAdminUser = this.isAdmin(chatId, sender.username);
+    const isApprovedUser = this.isAuthorized(chatId, sender.username);
+
+    // If access control is enabled and user is NOT authorized:
+    if (!isApprovedUser) {
+      const isNewReq = !this.pendingRequests.has(chatId);
+      this.pendingRequests.set(chatId, {
+        chatId,
+        username: userHandle,
+        name: userName,
+        requestedAt: new Date().toISOString(),
+        lastMessage: text || (message.photo ? "[Photo]" : message.document ? "[Document]" : "[Action]"),
+      });
+
+      const accessNotice = `🔒 *Access Restricted: Private Medical Bot*
+
+Hello *${userName}*! Medchat is currently in private mode for authorized medical students and clinicians.
+
+⏳ *Your access request has been sent to the administrator.* You will receive a notification here as soon as you are approved.
+
+📋 *Your Details:*
+• *Name:* ${userName}
+${userHandle ? `• *Username:* ${userHandle}\n` : ''}• *Telegram ID:* \`${chatId}\`
+
+_If you are the bot owner, activate admin mode with:_ \`/claimadmin <passcode>\``;
+
+      await this.sendMessage(chatId, accessNotice, "Markdown");
+
+      // Notify admins
+      if (isNewReq && this.adminChatIds.size > 0) {
+        for (const adminId of this.adminChatIds) {
+          try {
+            const alertMsg = `🔔 *New Access Request for Medchat*
+
+👤 *Student:* ${userName} ${userHandle ? `(${userHandle})` : ''}
+🆔 *Chat ID:* \`${chatId}\`
+💬 *Message:* "${(text || '').slice(0, 80)}"`;
+            await this.sendMessage(adminId, alertMsg, "Markdown", {
+              inline_keyboard: [
+                [
+                  { text: `✅ Approve ${userHandle || userName}`, callback_data: `auth_approve_${chatId}` },
+                  { text: `❌ Deny`, callback_data: `auth_deny_${chatId}` }
+                ]
+              ]
+            });
+          } catch (err) {
+            console.warn(`[Telegram] Failed to notify admin ${adminId}:`, err);
+          }
+        }
+      }
+
+      this.logActivity({
+        id: `auth-req-${Date.now()}`,
+        chatId,
+        userName,
+        userHandle,
+        userMessage: text || "[Media Upload]",
+        aiResponse: "[Access Denied - Pending Admin Approval]",
+        latencyMs: 5,
+        timestamp: new Date().toISOString(),
+        status: 'error',
+        errorMessage: 'Unauthorized User Request',
+        source: 'telegram',
+      });
+      return;
+    }
+
+    // Handle Admin Commands if sender is Admin
+    if (isAdminUser && text) {
+      if (text.startsWith("/approve")) {
+        const parts = text.split(" ");
+        const target = parts.slice(1).join(" ").trim();
+        if (!target) {
+          if (this.pendingRequests.size === 0) {
+            await this.sendMessage(chatId, "ℹ️ No pending requests.\n\nUsage: `/approve @username` or `/approve <chatId>`", "Markdown");
+            return;
+          }
+          let msg = `📋 *Pending Access Requests (${this.pendingRequests.size}):*\n\n`;
+          const buttons: any[] = [];
+          for (const [pId, req] of this.pendingRequests.entries()) {
+            msg += `• *${req.name}* ${req.username ? `(${req.username})` : ''} - \`${pId}\`\n`;
+            buttons.push([
+              { text: `✅ Approve ${req.username || req.name}`, callback_data: `auth_approve_${pId}` },
+              { text: `❌ Deny`, callback_data: `auth_deny_${pId}` }
+            ]);
+          }
+          await this.sendMessage(chatId, msg, "Markdown", { inline_keyboard: buttons });
+          return;
+        }
+
+        const res = await this.approveUser(target, userHandle || userName);
+        await this.sendMessage(chatId, `✅ *Approval Result:*\n\n${res.message}`, "Markdown");
+        return;
+      }
+
+      if (text.startsWith("/revoke")) {
+        const parts = text.split(" ");
+        const target = parts.slice(1).join(" ").trim();
+        if (!target) {
+          await this.sendMessage(chatId, "Usage: `/revoke @username` or `/revoke <chatId>`", "Markdown");
+          return;
+        }
+        const res = await this.revokeUser(target);
+        await this.sendMessage(chatId, `ℹ️ ${res.message}`, "Markdown");
+        return;
+      }
+
+      if (text === "/users" || text === "/whitelist" || text === "/members") {
+        const usersList = Array.from(this.approvedUsers.values());
+        let msg = `👥 *Authorized Students & Members (${usersList.length}):*\n\n`;
+        if (usersList.length === 0) {
+          msg += "_No regular users added yet._\n";
+        } else {
+          usersList.forEach((u, i) => {
+            msg += `${i + 1}. *${u.name}* ${u.username ? `(${u.username})` : ''} - \`${u.chatId}\`\n`;
+          });
+        }
+        if (this.approvedUsernames.size > 0) {
+          msg += `\n🏷️ *Whitelisted Usernames:* ${Array.from(this.approvedUsernames).map(u => `@${u}`).join(', ')}\n`;
+        }
+        msg += `\n👑 *Admins:* ${Array.from(this.adminChatIds).join(', ')}`;
+        await this.sendMessage(chatId, msg, "Markdown");
+        return;
+      }
+
+      if (text === "/pending") {
+        if (this.pendingRequests.size === 0) {
+          await this.sendMessage(chatId, "✅ *No pending requests!* All students have been processed.", "Markdown");
+          return;
+        }
+        let msg = `⏳ *Pending Access Requests (${this.pendingRequests.size}):*\n\n`;
+        const buttons: any[] = [];
+        for (const [pId, req] of this.pendingRequests.entries()) {
+          msg += `• *${req.name}* ${req.username ? `(${req.username})` : ''}\n  ID: \`${pId}\` | Msg: "${(req.lastMessage || '').slice(0, 40)}"\n`;
+          buttons.push([
+            { text: `✅ Approve ${req.username || req.name}`, callback_data: `auth_approve_${pId}` },
+            { text: `❌ Deny`, callback_data: `auth_deny_${pId}` }
+          ]);
+        }
+        await this.sendMessage(chatId, msg, "Markdown", { inline_keyboard: buttons });
+        return;
+      }
+
+      if (text.startsWith("/broadcast")) {
+        const broadcastMsg = text.replace("/broadcast", "").trim();
+        if (!broadcastMsg) {
+          await this.sendMessage(chatId, "Usage: `/broadcast <your message>`", "Markdown");
+          return;
+        }
+        const targets = Array.from(this.approvedUsers.keys());
+        let count = 0;
+        for (const targetId of targets) {
+          try {
+            await this.sendMessage(targetId, `📢 *Announcement from Administrator:*\n\n${broadcastMsg}`, "Markdown");
+            count++;
+          } catch {}
+        }
+        await this.sendMessage(chatId, `✅ Broadcast sent to *${count}* / ${targets.length} users.`, "Markdown");
+        return;
+      }
+
+      if (text === "/toggleauth") {
+        this.accessControlEnabled = !this.accessControlEnabled;
+        await this.sendMessage(
+          chatId,
+          `🔒 *Access Control is now: ${this.accessControlEnabled ? 'ENABLED (Private - Approval Required)' : 'DISABLED (Public - Anyone can chat)'}*`,
+          "Markdown"
+        );
+        return;
+      }
+
+      if (text === "/admin" || text === "/adminhelp") {
+        const adminHelp = `👑 *Medchat Administrator Commands*
+
+• \`/approve <@username or ID>\` - Grant user access
+• \`/revoke <@username or ID>\` - Revoke user access
+• \`/pending\` - View waiting access requests
+• \`/users\` - List all authorized users
+• \`/broadcast <text>\` - Send message to all users
+• \`/toggleauth\` - Toggle private/public mode
+• \`/setprompt <prompt>\` - Set your custom prompt
+• \`/resetprompt\` - Reset system instructions`;
+        await this.sendMessage(chatId, adminHelp, "Markdown");
+        return;
+      }
+    }
 
     // Check for Image / Photo message
     if (message.photo && Array.isArray(message.photo) && message.photo.length > 0) {
@@ -1683,7 +2140,6 @@ Address the user's query with expert medical reasoning, quoting and synthesizing
     }
 
     if (!message.text) return;
-    const text = message.text.trim();
 
     this.stats.lastActiveAt = new Date().toISOString();
     this.stats.totalMessages++;
@@ -2367,7 +2823,7 @@ CRITICAL INSTRUCTION: DO NOT generate or attach any multiple-choice questions (M
     const { text: reply, latencyMs } = await generateGeminiReply(
       prompt,
       [],
-      this.getSystemPrompt(chatId),
+      this.getSystemPrompt("web_simulator"),
       this.config.temperature,
       attachments,
       this.config.model

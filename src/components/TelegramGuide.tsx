@@ -187,6 +187,36 @@ export function TelegramGuide({ botInfo }: TelegramGuideProps) {
               <span className="text-slate-600">Resets medical conversation context memory to start fresh.</span>
             </div>
           </div>
+
+          {/* Admin Control Commands */}
+          <div className="pt-2 border-t border-slate-100 space-y-2">
+            <h4 className="text-xs font-semibold text-amber-800 flex items-center gap-1.5">
+              <span>👑</span>
+              <span>Admin Access & Approval Commands (Option 3)</span>
+            </h4>
+            <div className="space-y-1.5 text-xs">
+              <div className="flex items-start gap-2 p-2 rounded-lg bg-amber-50/60 border border-amber-200/70">
+                <span className="font-mono font-bold text-amber-900 flex-shrink-0">/claimadmin [passcode]</span>
+                <span className="text-slate-700">Activates administrator privileges on your Telegram account (Default: <code>medadmin2026</code>).</span>
+              </div>
+              <div className="flex items-start gap-2 p-2 rounded-lg bg-slate-50 border border-slate-100">
+                <span className="font-mono font-bold text-teal-700 flex-shrink-0">/approve @user</span>
+                <span className="text-slate-600">Approves a student by @username or Telegram numeric Chat ID.</span>
+              </div>
+              <div className="flex items-start gap-2 p-2 rounded-lg bg-slate-50 border border-slate-100">
+                <span className="font-mono font-bold text-rose-700 flex-shrink-0">/revoke @user</span>
+                <span className="text-slate-600">Instantly revokes a student's access.</span>
+              </div>
+              <div className="flex items-start gap-2 p-2 rounded-lg bg-slate-50 border border-slate-100">
+                <span className="font-mono font-bold text-slate-700 flex-shrink-0">/pending</span>
+                <span className="text-slate-600">Lists pending student requests with 1-click [✅ Approve] buttons.</span>
+              </div>
+              <div className="flex items-start gap-2 p-2 rounded-lg bg-slate-50 border border-slate-100">
+                <span className="font-mono font-bold text-slate-700 flex-shrink-0">/broadcast [text]</span>
+                <span className="text-slate-600">Broadcasts an announcement to all approved students.</span>
+              </div>
+            </div>
+          </div>
         </div>
       </div>
 

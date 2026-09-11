@@ -99,3 +99,29 @@ export interface BotStatusResponse {
   geminiModel: string;
   appUrl: string;
 }
+
+export interface AuthorizedUser {
+  chatId: number | string;
+  username?: string;
+  name?: string;
+  approvedAt: string;
+  approvedBy?: string;
+}
+
+export interface PendingUserRequest {
+  chatId: number | string;
+  username?: string;
+  name?: string;
+  requestedAt: string;
+  lastMessage?: string;
+}
+
+export interface AccessControlStatus {
+  accessControlEnabled: boolean;
+  adminSecretSet: boolean;
+  adminsCount: number;
+  admins: { type: 'chatId' | 'username'; value: string }[];
+  approvedUsers: AuthorizedUser[];
+  approvedUsernames: string[];
+  pendingRequests: PendingUserRequest[];
+}
