@@ -1,0 +1,7 @@
+{
+  "name": "Gemini Telegram Bot",
+  "description": "An AI-powered Medical Sciences Telegram bot powered by Google Gemini, featuring interactive Telegram quiz polls, raw text clinical MCQs, downloadable PDF study notes, on-demand medical image search, multimodal vision, and board exam tips.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
+
