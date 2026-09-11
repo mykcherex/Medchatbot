@@ -17,7 +17,7 @@ import {
   FileQuestion,
   Lightbulb
 } from 'lucide-react';
-import { DEFAULT_MEDICAL_PROMPT } from '../../server/telegramBot';
+import { DEFAULT_MEDICAL_PROMPT } from '../constants';
 
 interface BotSettingsProps {
   config: BotConfig;

@@ -1,6 +1,8 @@
 import { generateGeminiReply, ConversationTurn, MediaAttachment } from "./geminiService";
 import { detectImageRequest, searchMedicalImages, searchMedicalImage, ImageSearchResult } from "./imageSearchService";
 import { generateMedicalPdf } from "./pdfService";
+import { extractMarkdownTables, renderTableToPngBuffer } from "./tableImageService";
+import { DEFAULT_MEDICAL_PROMPT } from "../src/constants";
 
 export interface QuizData {
   scenario?: string;
@@ -134,69 +136,7 @@ export interface PendingUserRequest {
   lastMessage?: string;
 }
 
-export const DEFAULT_MEDICAL_PROMPT = `You are Medchat, an elite Medical Sciences Professor, Board-Examiner (USMLE Step 1 & 2 CK, NEET-PG, PLAB, NCLEX), and Clinical Educator powered by Google Gemini.
-
-SPECIALTY SCOPE:
-You specialize strictly and deeply in ALL medical sciences:
-1. Gross Anatomy, Neuroanatomy, Histology, and Embryology (anatomical relations, cranial nerves, vascular supply, embryological derivatives).
-2. Medical Physiology (Cardiovascular, Renal, Respiratory, Neuro, GI, Endocrine, Acid-Base balance, cellular transport).
-3. Medical Biochemistry & Clinical Genetics (Metabolic pathways, enzyme kinetics, inborn errors of metabolism, vitamin deficiencies, molecular genetics).
-4. Medical Microbiology & Immunology (Bacteriology, Virology, Mycology, Parasitology, Antimicrobials, Innate/Adaptive immunity, Hypersensitivity reactions).
-5. General & Systemic Pathology (Pathophysiology of disease, classic histopathology clues, diagnostic lab markers, morphologic features).
-6. Medical Pharmacology (Mechanisms of Action, Pharmacokinetics/Dynamics, High-yield adverse drug reactions, Drug-drug interactions, Antidotes, First-line clinical guidelines).
-7. Clinical Medicine & Diagnostic Reasoning (Internal Medicine, Emergency Medicine, Surgery, Pediatrics, OB/GYN).
-
-CORE BEHAVIORS & INSTRUCTIONS:
-- Target Audience: Medical students, clinical trainees, and healthcare professionals preparing for exams and rounds.
-- Strict Domain Focus: You are strictly dedicated to medical sciences and clinical education. If a user asks non-medical questions, politely inform them that you specialize exclusively in medical education.
-- Clinical Precision & High-Yield: Always emphasize precise physiological mechanisms, receptor actions, gold-standard diagnostic steps, and classic buzzwords (e.g., 'currant jelly sputum', 'bite cells & Heinz bodies', 'tram-track appearance', 'Koplik spots').
-- Telegram Formatting: Use clean Telegram markdown with bold headings, bullet points, and concise clinical explanations optimized for mobile reading.
-
-CRITICAL QUESTION GENERATION POLICY:
-- DO NOT automatically generate a multiple-choice question (MCQ), quiz, or practice test for every prompt!
-- Let question generation DEPEND ON THE SITUATION AND USER INTENT:
-  * If the user asks for an explanation, fact, definition, summary, image, or diagnosis (e.g. "explain heart failure", "what is the mechanism of action of metformin?", "heart image", "hi"): provide a thorough, crystal-clear, high-yield explanation WITHOUT appending an unsolicited test question or quiz.
-  * ONLY generate practice questions, MCQs, or quizzes when the user explicitly asks for them (e.g. commands like /mcq, /pharm, /anatomy, or phrases like "give me an MCQ", "quiz me", "test my knowledge", "practice question", or when answering a practice quiz).
-
-MULTIMODAL (ANATOMICAL IMAGES, RADIOLOGY, HISTOLOGY & DOCUMENTS) CLINICAL RULES:
-- When analyzing anatomical images, diagrams, cadaveric dissections, cross-sections, or surgical views:
-  * Precisely identify, delineate, and explain EVERY visible organ, muscle, bone, vessel, and nerve.
-  * Thoroughly detail spatial and relational anatomy: anterior/posterior, medial/lateral, superior/inferior borders, fascial compartments, and anatomical triangles.
-  * Detail neurovascular supply: specific arterial branches, venous drainage, nerve roots, motor/sensory innervation, and lymphatic pathways.
-  * Highlight clinical & surgical correlates: compression sites (e.g., carpal tunnel, cubital tunnel, thoracic outlet), surgical danger zones, injury nerve palsy deficits, and referred pain pathways.
-  * Provide high-yield board exam associations: embryological origins, anatomical variations, and memorable mnemonics.
-  * DO NOT formulate an unsolicited MCQ unless the user explicitly requested one.
-- When analyzing radiological imaging (X-Ray, CT, MRI, Ultrasound, Angiography):
-  * State the modality, projection/plane, contrast status, and windowing.
-  * Perform a systematic anatomical survey of the region.
-  * Characterize the primary abnormality: anatomical location, attenuation/signal intensity (e.g., T1/T2, FLAIR, DWI restriction, hypodensity/hyperdensity), margins, and mass effect.
-  * Formulate an evidence-based differential diagnosis ranked by probability with next diagnostic step.
-- When analyzing histopathology micrographs:
-  * Specify tissue of origin, histological stain (e.g. H&E, Trichrome, Silver, PAS, Congo Red).
-  * Describe cellular architecture, cytology, nuclear features, pathognomonic hallmarks (e.g., Reed-Sternberg cells, Auer rods, Councilman bodies, Psammoma bodies, granulomas), and molecular correlates.
-- When reading and processing medical documents (PDF lecture notes, clinical guidelines, research papers, clinical notes, text):
-  * Deliver an exhaustive, high-yield structured synthesis:
-    1) Executive Clinical Summary & Key Concepts
-    2) Core Pathophysiological / Pharmacological / Anatomical Mechanisms
-    3) Diagnostic Algorithms & Therapeutic Management Tables
-    4) High-Yield USMLE / Board Exam Pearls, Common Traps, and Mnemonics
-  * If the user asks a specific question or query regarding the document, provide a comprehensive, direct, evidence-based answer referencing the document's specific data, findings, or recommendations.
-  * DO NOT force practice MCQs unless the user explicitly requested questions or quizzes in their query.
-
-MCQ & QUIZ GENERATION RULES (WHEN EXPLICITLY REQUESTED):
-When generating MCQs, quizzes, or practice questions:
-- STRICTLY FOLLOW USER INTENT & SCOPE:
-  * If the user asks for a specific subject or topic (e.g. "Heart anatomy", "Pharmacology mechanisms", "Renal acid-base"), strictly focus on that topic.
-  * CLINICAL VIGNETTE vs DIRECT CONCEPTUAL QUESTION: ONLY generate a clinical patient scenario/vignette if the user EXPLICITLY requested a clinical case, patient vignette, scenario, or case study. If the user asks for direct subject questions or quizzes (e.g. "Heart anatomy quiz", "Beta blockers quiz"), ask direct, high-yield questions testing anatomical/biological facts WITHOUT fabricating an unwanted patient clinical scenario!
-  * QUANTITY / COUNT: If the user requests a specific number of quizzes or questions (e.g. "30 quizzes", "10 questions", "5 mcqs"), generate that exact requested quantity.
-- Question Structure:
-  * Sharp question stem testing higher-order understanding.
-  * 4 or 5 options labeled A), B), C), D), and optionally E).
-  * 'Correct Answer' and 'Detailed Rationale' explaining mechanism, distractor breakdowns, and high-yield clinical pearl.
-
-EXAM TIPS & MNEMONICS RULES:
-When providing exam tips:
-- Provide high-yield, tested medical exam strategies and memorable medical mnemonics.`;
+export { DEFAULT_MEDICAL_PROMPT };
 
 function sanitizeTelegramMarkdown(text: string): string {
   if (!text) return "";
@@ -765,6 +705,129 @@ Tap an option below or send your first medical question to begin!`;
       console.error('[Telegram] sendPhoto error:', err);
       return false;
     }
+  }
+
+  public async sendPhotoBuffer(
+    chatId: number | string,
+    fileBuffer: Buffer,
+    fileName: string = "medical_table.png",
+    caption?: string,
+    replyMarkup?: any
+  ): Promise<boolean> {
+    try {
+      const formData = new FormData();
+      formData.append('chat_id', String(chatId));
+      formData.append('photo', new Blob([fileBuffer], { type: 'image/png' }), fileName);
+      if (caption) {
+        formData.append('caption', sanitizeTelegramMarkdown(caption.slice(0, 1024)));
+        formData.append('parse_mode', 'Markdown');
+      }
+      if (replyMarkup) {
+        formData.append('reply_markup', JSON.stringify(replyMarkup));
+      }
+
+      let res = await fetch(`${this.getApiBase()}/sendPhoto`, {
+        method: 'POST',
+        body: formData,
+      });
+      let data = await res.json();
+
+      if (!data.ok && caption) {
+        // Retry without Markdown if syntax caused error
+        const retryFormData = new FormData();
+        retryFormData.append('chat_id', String(chatId));
+        retryFormData.append('photo', new Blob([fileBuffer], { type: 'image/png' }), fileName);
+        retryFormData.append('caption', caption.slice(0, 1024));
+        if (replyMarkup) {
+          retryFormData.append('reply_markup', JSON.stringify(replyMarkup));
+        }
+        res = await fetch(`${this.getApiBase()}/sendPhoto`, {
+          method: 'POST',
+          body: retryFormData,
+        });
+        data = await res.json();
+      }
+
+      return Boolean(data.ok);
+    } catch (err) {
+      console.error('[Telegram] sendPhotoBuffer error:', err);
+      return false;
+    }
+  }
+
+  /**
+   * Intelligently sends medical responses to Telegram.
+   * If the text contains markdown tables or tabular comparison diagrams,
+   * it automatically renders the table into a high-resolution visual PNG image card
+   * and inserts it between the preceding and succeeding text blocks right where it is needed!
+   */
+  public async sendSmartMedicalMessage(
+    chatId: number | string,
+    fullText: string,
+    parseMode: 'Markdown' | 'HTML' | null = 'Markdown',
+    replyMarkup?: any
+  ): Promise<boolean> {
+    if (!fullText) return false;
+
+    // Check for tables in the response
+    const { tables, parts } = extractMarkdownTables(fullText);
+
+    // If no markdown tables found, send as standard message
+    if (tables.length === 0 || parts.length === 0) {
+      return this.sendMessage(chatId, fullText, parseMode, replyMarkup);
+    }
+
+    // Process parts sequentially: text -> visual table image -> text -> etc.
+    let overallSuccess = true;
+    for (let i = 0; i < parts.length; i++) {
+      const part = parts[i];
+      const isLastPart = i === parts.length - 1;
+      const currentMarkup = isLastPart ? replyMarkup : undefined;
+
+      if (part.type === 'text') {
+        const textContent = part.content.trim();
+        if (textContent.length > 0) {
+          const sent = await this.sendMessage(chatId, textContent, parseMode, currentMarkup);
+          if (!sent) overallSuccess = false;
+        }
+      } else if (part.type === 'table' && part.tableData) {
+        try {
+          await this.sendChatAction(chatId, "upload_photo");
+          const pngBuffer = await renderTableToPngBuffer(part.tableData);
+          const tableTitle = part.tableData.title || "Clinical Comparison & Reference Table";
+          const caption = `📊 *${tableTitle}*`;
+
+          const sent = await this.sendPhotoBuffer(
+            chatId,
+            pngBuffer,
+            "medical_table.png",
+            caption,
+            currentMarkup
+          );
+
+          if (!sent) {
+            // Fallback: send as monospace code block if photo failed
+            await this.sendMessage(
+              chatId,
+              `📊 *${tableTitle}*\n\`\`\`\n${part.content}\n\`\`\``,
+              'Markdown',
+              currentMarkup
+            );
+          }
+        } catch (err) {
+          console.error("[Telegram] Error rendering table image:", err);
+          // Graceful fallback to text
+          await this.sendMessage(
+            chatId,
+            `📊 *Clinical Table:*\n\`\`\`\n${part.content}\n\`\`\``,
+            'Markdown',
+            currentMarkup
+          );
+        }
+      }
+    }
+
+    return overallSuccess;
   }
 
   public async sendMediaGroup(
@@ -1742,7 +1805,7 @@ CRITICAL INSTRUCTION: DO NOT generate or append any multiple-choice questions (M
       this.totalLatencyCount++;
       this.stats.averageLatencyMs = Math.round(this.totalLatencySum / this.totalLatencyCount);
 
-      await this.sendMessage(chatId, reply, "Markdown");
+      await this.sendSmartMedicalMessage(chatId, reply, "Markdown");
 
       this.logActivity({
         id: `img-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
@@ -1982,7 +2045,7 @@ Address the user's query with expert medical reasoning, quoting and synthesizing
       this.totalLatencyCount++;
       this.stats.averageLatencyMs = Math.round(this.totalLatencySum / this.totalLatencyCount);
 
-      await this.sendMessage(chatId, reply, "Markdown");
+      await this.sendSmartMedicalMessage(chatId, reply, "Markdown");
 
       this.logActivity({
         id: `doc-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
@@ -2667,8 +2730,8 @@ Medchat is equipped with multimodal perception powered by Google Gemini!
       this.totalLatencyCount++;
       this.stats.averageLatencyMs = Math.round(this.totalLatencySum / this.totalLatencyCount);
 
-      // Send to Telegram without sub buttons
-      await this.sendMessage(chatId, reply, "Markdown");
+      // Send to Telegram with smart visual table rendering
+      await this.sendSmartMedicalMessage(chatId, reply, "Markdown");
       this.lastBotResponseByChat.set(chatId, {
         text: reply,
         topic: text.slice(0, 40) || "Clinical Discussion",

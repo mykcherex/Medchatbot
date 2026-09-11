@@ -15,7 +15,7 @@ import {
   Zap,
   Info
 } from 'lucide-react';
-import { DEFAULT_MEDICAL_PROMPT } from '../../server/telegramBot';
+import { DEFAULT_MEDICAL_PROMPT } from '../constants';
 
 interface InstructionEditorProps {
   config: BotConfig;

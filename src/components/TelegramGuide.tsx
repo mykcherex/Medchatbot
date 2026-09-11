@@ -139,6 +139,9 @@ export function TelegramGuide({ botInfo }: TelegramGuideProps) {
             <p>
               • <strong>Send Documents / PDFs:</strong> Upload lecture handouts or guidelines. Medchat synthesizes key pathophysiology, first-line treatments, and active-recall MCQs.
             </p>
+            <p>
+              • <strong>📊 Visual Image Tables & Diagrams:</strong> Whenever notes contain comparisons, differential diagnoses, or staging tables, Medchat automatically renders crisp, high-resolution infographic image tables right between your text explanations!
+            </p>
           </div>
         </div>
 
