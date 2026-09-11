@@ -765,11 +765,6 @@ class TelegramBotManager {
   public getPersistentReplyKeyboard() {
     return {
       keyboard: [
-        [{ text: "📊 Interactive Quiz" }, { text: "🎯 High-Yield MCQ" }],
-        [{ text: "💡 Exam Tips & Mnemonics" }, { text: "📄 Download Notes PDF" }],
-        [{ text: "📸 Medical Vision & Docs Guide" }, { text: "📋 Medical Menu" }],
-        [{ text: "💊 Pharmacology MCQ" }, { text: "🫀 Anatomy / Physio MCQ" }],
-        [{ text: "🔬 Pathology & Micro MCQ" }, { text: "🧬 Biochemistry MCQ" }],
         [{ text: "🧹 Reset Memory" }, { text: "⚙️ Custom Prompt" }],
       ],
       resize_keyboard: true,
