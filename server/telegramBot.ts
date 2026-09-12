@@ -3978,18 +3978,7 @@ Medchat is equipped with multimodal perception powered by Google Gemini!
       return;
     }
 
-    // 4b. Long Text Case Questions Request (e.g., "generate 50 long text case questions", "give me 10 complex cases", "harder cases on cardiology")
-    const isExplicitCaseQuestions =
-      intent.isTextCaseRequested ||
-      (intent.isLongCase && !intent.isPollRequested && (intent.count > 1 || /\b(questions?|cases?|items?|vignettes?)\b/i.test(text))) ||
-      /\b(long text (?:case )?questions?|case questions?|case vignettes?|clinical case questions?)\b/i.test(text);
-
-    if (isExplicitCaseQuestions) {
-      await this.handleLongTextCaseQuestions(chatId, sender, userName, userHandle, text, intent);
-      return;
-    }
-
-    // 5. Interactive Quiz Request (Triggered when prompted with quizzes/polls or interactive quiz)
+    // 4b. Interactive Quiz Request (Triggered when prompted with quizzes/polls or interactive quiz)
     const isQuizWord =
       intent.isPollRequested ||
       /\bquiz(?:zes)?\b/i.test(text) ||
@@ -3999,6 +3988,18 @@ Medchat is equipped with multimodal perception powered by Google Gemini!
 
     if (isQuizWord) {
       await this.handleInteractiveQuizzes(chatId, sender, userName, userHandle, text, intent);
+      return;
+    }
+
+    // 5. Long Text Case Questions Request (e.g., "generate 50 long text case questions")
+    // Note: This is checked AFTER isQuizWord so that if they say "long text case questions quiz", it generates polls.
+    const isExplicitCaseQuestions =
+      intent.isTextCaseRequested ||
+      (intent.isLongCase && !intent.isPollRequested && (intent.count > 1 || /\b(questions?|cases?|items?|vignettes?)\b/i.test(text))) ||
+      /\b(long text (?:case )?questions?|case questions?|case vignettes?|clinical case questions?)\b/i.test(text);
+
+    if (isExplicitCaseQuestions) {
+      await this.handleLongTextCaseQuestions(chatId, sender, userName, userHandle, text, intent);
       return;
     }
 
