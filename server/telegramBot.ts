@@ -15,25 +15,62 @@ export interface QuizData {
   topic?: string;
 }
 
-export interface ParsedQuizRequest {
-  count: number;
-  topic: string;
-  allowScenario: boolean;
-  userPrompt: string;
+export interface LongTextCaseQuestion {
+  caseNumber: number;
+  title: string;
+  vignette: string;
+  question: string;
+  options: string[];
+  correctAnswer: string;
+  mechanism: string;
+  distractorAnalysis: string;
+  clinicalPearl: string;
 }
 
-export function parseQuizPrompt(rawPrompt: string): ParsedQuizRequest {
+export interface UserPromptIntent {
+  count: number;
+  topic: string;
+  isHarder: boolean;
+  isComplex: boolean;
+  isLongCase: boolean;
+  allowScenario: boolean;
+  isPollRequested: boolean;
+  isTextCaseRequested: boolean;
+  isMcqRequested: boolean;
+  rawPrompt: string;
+}
+
+export interface PendingMediaBatchItem {
+  fileId: string;
+  mimeType: string;
+  fileName?: string;
+  caption?: string;
+  messageId: number;
+  timestamp: number;
+}
+
+export function parseUserPromptIntent(rawPrompt: string, defaultTopic: string = "General Clinical Medicine"): UserPromptIntent {
   const text = (rawPrompt || "").trim();
 
-  // 1. Check if user explicitly requests a clinical case / scenario / patient vignette
-  const allowScenario = /\b(clinical case|clinical scenario|vignette|patient|case study|clinical vignette|patient vignette)\b/i.test(text);
+  // 1. Difficulty & Complexity flags
+  const isHarder = /\b(hard|harder|hardest|difficult|very hard|challenging|board trap|step 3|expert|subspecialty|tough|trick|high yield trap)\b/i.test(text);
+  const isComplex = /\b(complex|complicated|multimorbid|multidisciplinary|atypical|multi-step|second order|third order|diagnostic dilemma|atypical presentation)\b/i.test(text);
 
-  // 2. Extract count (e.g. "30 quizzes", "10 quiz", "/quiz 5", "generate 20 quizzes")
+  // 2. Scenario & Length flags
+  const isLongCase = /\b(long|long text|detailed|extended|in-depth|comprehensive|full vignette|long case|vignettes|vignette|case study|cases|case questions)\b/i.test(text);
+  const allowScenario = isLongCase || /\b(clinical case|clinical scenario|vignette|patient|case study|clinical vignette|patient vignette|presentation|findings|hx|history)\b/i.test(text);
+
+  // 3. Format flags
+  const isPollRequested = /\b(poll|polls|telegram poll|quiz|quizzes|interactive quiz|\/quiz)\b/i.test(text) && !/\b(text case|written case|case document|pdf|no poll)\b/i.test(text);
+  const isTextCaseRequested = /\b(text case|case questions|clinical questions|written questions|case studies|question bank|long text case)\b/i.test(text) || (isLongCase && !isPollRequested && (/\b(questions?|cases?|items?)\b/i.test(text)));
+  const isMcqRequested = /\b(mcq|mcqs|\/mcq|multiple choice)\b/i.test(text);
+
+  // 4. Count extraction (supports up to 50!)
   let count = 1;
   const countRegexes = [
-    /\b(\d+)\s*(?:quizzes|quiz|questions|mcqs|items)\b/i,
-    /(?:generate|give me|create|send|make|produce)\s*(\d+)\s*(?:quizzes|quiz|questions|mcqs|items)?/i,
-    /(?:\/quiz|quiz)\s*(\d+)\b/i,
+    /\b(\d+)\s*(?:long\s+)?(?:text\s+)?(?:case\s+)?(?:questions?|quizzes|quiz|mcqs?|items?|cases?|polls?|vignettes?)\b/i,
+    /(?:generate|give me|create|send|make|produce|write|test me with)\s*(\d+)\s*(?:long\s+)?(?:text\s+)?(?:case\s+)?(?:questions?|quizzes|quiz|mcqs?|items?|cases?|polls?|vignettes?)?/i,
+    /(?:\/quiz|\/mcq|quiz|mcq)\s*(\d+)\b/i,
     /\b(\d+)\s*(?:interactive\s*)?quiz(?:zes)?\b/i
   ];
 
@@ -48,29 +85,59 @@ export function parseQuizPrompt(rawPrompt: string): ParsedQuizRequest {
     }
   }
 
-  // Cap count between 1 and 50 to ensure reliability and avoid rate limits
+  // If text specifically says "50" anywhere in a question request, ensure count is 50
+  if (/\b50\b/.test(text) && /\b(questions?|cases?|quizzes?|polls?|items?|mcqs?)\b/i.test(text)) {
+    count = 50;
+  }
+
+  // Cap count between 1 and 50 to maintain performance and high quality
   count = Math.min(Math.max(1, count), 50);
 
-  // 3. Extract topic cleanly
+  // 5. Clean Topic Extraction
   let topic = text
-    .replace(/^\/quiz\s*/i, "")
-    .replace(/(?:generate|give me|create|send|make|produce|test me with)\s*/i, "")
-    .replace(/\b\d+\s*(?:quizzes|quiz|questions|mcqs|items)?\b/gi, "")
-    .replace(/\b(quiz me on|quiz on|quizzes on|interactive quiz|quiz|quizzes)\b/gi, "")
-    .replace(/\b(please|can you|i want|give|provide)\b/gi, "")
-    .replace(/\b(clinical case|clinical scenario|vignette|case study)\b/gi, "")
+    .replace(/^\/(?:quiz|mcq|poll|cases?)\s*/i, "")
+    .replace(/(?:generate|give me|create|send|make|produce|write|test me with|provide|ask me)\s*/i, "")
+    .replace(/\b\d+\s*(?:long\s+)?(?:text\s+)?(?:case\s+)?(?:questions?|quizzes|quiz|mcqs?|items?|cases?|polls?|vignettes?)?\b/gi, "")
+    .replace(/\b(quiz me on|quiz on|quizzes on|interactive quiz|quiz|quizzes|poll questions|polls?|mcqs?|mcq)\b/gi, "")
+    .replace(/\b(long text case questions|long text case|case questions|cases|case studies|vignettes?)\b/gi, "")
+    .replace(/\b(harder|hard|difficult|very hard|complex|complicated|challenging)\b/gi, "")
+    .replace(/\b(please|can you|i want|give|provide|about|on|for)\b/gi, "")
+    .replace(/\b(clinical case|clinical scenario|vignette|case study|questions?)\b/gi, "")
     .trim();
 
   topic = topic.replace(/^[:\-\s,]+|[:\-\s,]+$/g, "").trim();
-  if (!topic) {
-    topic = "General Medical Sciences";
+  if (!topic || topic.length < 2) {
+    topic = defaultTopic;
   }
 
   return {
     count,
     topic,
+    isHarder,
+    isComplex,
+    isLongCase,
     allowScenario,
-    userPrompt: text,
+    isPollRequested,
+    isTextCaseRequested,
+    isMcqRequested,
+    rawPrompt: text,
+  };
+}
+
+export interface ParsedQuizRequest {
+  count: number;
+  topic: string;
+  allowScenario: boolean;
+  userPrompt: string;
+}
+
+export function parseQuizPrompt(rawPrompt: string): ParsedQuizRequest {
+  const intent = parseUserPromptIntent(rawPrompt, "General Medical Sciences");
+  return {
+    count: intent.count,
+    topic: intent.topic,
+    allowScenario: intent.allowScenario,
+    userPrompt: rawPrompt,
   };
 }
 
@@ -163,7 +230,7 @@ class TelegramBotManager {
     {
       text: string;
       topic: string;
-      sourceType: 'general' | 'image' | 'document' | 'mcq' | 'quiz' | 'exam_tips';
+      sourceType: 'general' | 'image' | 'document' | 'mcq' | 'quiz' | 'long_case' | 'exam_tips';
       timestamp: number;
     }
   > = new Map();
@@ -172,6 +239,20 @@ class TelegramBotManager {
   private logs: MessageLogEntry[] = [];
   private totalLatencySum: number = 0;
   private totalLatencyCount: number = 0;
+
+  // Media Group & Batch Collection (buffers multi-image albums & bursts)
+  private mediaBatchMap: Map<
+    string,
+    {
+      items: PendingMediaBatchItem[];
+      timer: NodeJS.Timeout;
+      chatId: number | string;
+      sender: any;
+      userName: string;
+      userHandle?: string;
+      startTime: number;
+    }
+  > = new Map();
 
   // Access Control & Whitelist State (Option 3)
   private accessControlEnabled: boolean = true;
@@ -1430,7 +1511,7 @@ Include:
     return result;
   }
 
-  // Interactive Telegram-style Medical Quiz Generator (Supports Multiple Quizzes & User Intent)
+  // Interactive Telegram-style Medical Quiz Generator (Supports up to 50 Quizzes & Strict Difficulty/Complexity Intent)
   public async generateInteractiveQuizzes(
     userPrompt: string,
     topicOverride?: string,
@@ -1443,12 +1524,16 @@ Include:
     count: number;
     topic: string;
     allowScenario: boolean;
+    isHarder: boolean;
+    isComplex: boolean;
   }> {
     const startTime = Date.now();
-    const parsed = parseQuizPrompt(userPrompt);
-    const count = countOverride !== undefined && countOverride > 0 ? countOverride : parsed.count;
-    const topic = topicOverride || parsed.topic;
-    const allowScenario = parsed.allowScenario;
+    const intent = parseUserPromptIntent(userPrompt, topicOverride || "General Medical Sciences");
+    const count = countOverride !== undefined && countOverride > 0 ? countOverride : intent.count;
+    const topic = topicOverride || intent.topic;
+    const allowScenario = intent.allowScenario;
+    const isHarder = intent.isHarder;
+    const isComplex = intent.isComplex;
 
     // We generate quizzes in batches of at most 10 for parallel speed and reliability
     const batchSizes: number[] = [];
@@ -1460,7 +1545,17 @@ Include:
     }
 
     const batchPromises = batchSizes.map((batchCount, batchIdx) =>
-      this.generateQuizBatch(topic, batchCount, allowScenario, userPrompt, batchIdx, batchSizes.length, attachments)
+      this.generateQuizBatch(
+        topic,
+        batchCount,
+        allowScenario,
+        isHarder,
+        isComplex,
+        userPrompt,
+        batchIdx,
+        batchSizes.length,
+        attachments
+      )
     );
 
     const batchResults = await Promise.all(batchPromises);
@@ -1473,7 +1568,7 @@ Include:
     if (allQuizzes.length === 0) {
       allQuizzes = [
         {
-          scenario: allowScenario ? "A 52-year-old patient presents for evaluation." : "",
+          scenario: allowScenario ? "A 52-year-old patient presents with classic clinical findings for evaluation." : "",
           question: `Which of the following is a classic high-yield feature of ${topic}?`,
           options: ["Primary characteristic", "Secondary finding", "Incorrect distractor A", "Incorrect distractor B"],
           correctOptionId: 0,
@@ -1533,6 +1628,8 @@ Include:
       count: allQuizzes.length,
       topic,
       allowScenario,
+      isHarder,
+      isComplex,
     };
   }
 
@@ -1540,6 +1637,8 @@ Include:
     topic: string,
     count: number,
     allowScenario: boolean,
+    isHarder: boolean,
+    isComplex: boolean,
     userPrompt: string,
     batchIndex: number,
     totalBatches: number,
@@ -1550,14 +1649,28 @@ Include:
       : "";
 
     const scenarioDirective = allowScenario
-      ? `Include a concise clinical patient case in "scenario" for each question.`
-      : `CRITICAL INSTRUCTION: The user prompt is "${userPrompt}". The user asked for direct questions on "${topic}" without asking for a clinical scenario! DO NOT generate any patient scenarios or clinical case vignettes. Set "scenario" to "" (empty string) for every question, and make each "question" test ${topic} directly and clearly.`;
+      ? `Include a realistic, concise clinical patient case in "scenario" for each question.`
+      : `CRITICAL INSTRUCTION: The user asked for direct questions on "${topic}" without requesting a patient scenario. Set "scenario" to "" (empty string) for every question, and make each "question" test ${topic} directly.`;
+
+    const difficultyDirective = isHarder
+      ? `🔥 HARDER LEVEL DIRECTIVE: Formulate higher-order 2nd-order or 3rd-order clinical reasoning questions with challenging, subtle distractors, tricky board traps, and nuanced clinical distinctions.`
+      : "";
+
+    const complexityDirective = isComplex
+      ? `🧬 COMPLEXITY DIRECTIVE: Formulate complex multi-step medical questions featuring multimorbid conditions, atypical disease presentations, or diagnostic dilemmas.`
+      : "";
+
+    const attachmentDirective = attachments.length > 0
+      ? `📸 IMAGE ATTACHMENT DIRECTIVE: You have received ${attachments.length} medical image(s). Base the quiz questions and findings directly on the visual structures, histology, or radiographic patterns visible in the uploaded image(s).`
+      : "";
 
     const prompt = `Generate exactly ${count} distinct, high-yield, interactive multiple-choice quiz questions specifically testing "${topic}". ${focus}
 
 USER INTENT & CUSTOM INSTRUCTIONS:
 The user specifically requested: "${userPrompt}"
-CRITICAL: You MUST strictly adapt the difficulty, style, and specific focus to perfectly match what the user requested above. If they asked for hard questions, make them extremely challenging. If they asked for a specific topic, only focus on that.
+${difficultyDirective}
+${complexityDirective}
+${attachmentDirective}
 
 SCENARIO RULE:
 ${scenarioDirective}
@@ -1565,7 +1678,7 @@ ${scenarioDirective}
 Respond ONLY with a valid JSON array containing exactly ${count} object(s), with NO markdown formatting, NO backticks, and NO surrounding text:
 [
   {
-    "scenario": "${allowScenario ? "Brief patient vignette" : ""}",
+    "scenario": "${allowScenario ? "Patient vignette" : ""}",
     "question": "Clear, direct question stem testing ${topic} directly (MAXIMUM 280 characters)",
     "options": [
       "Option A (MAXIMUM 95 characters)",
@@ -1610,6 +1723,421 @@ CRITICAL CONSTRAINTS:
     } catch (err) {
       console.warn(`[Quiz Batch ${batchIndex + 1}] Generation error:`, err);
       return [];
+    }
+  }
+
+  // Generate Long-Text Clinical Case Questions (Supports up to 50 comprehensive patient cases with full explanations)
+  public async generateLongTextCaseQuestions(
+    userPrompt: string,
+    topicOverride?: string,
+    countOverride?: number,
+    attachments: MediaAttachment[] = [],
+    chatId?: number | string
+  ): Promise<{
+    cases: LongTextCaseQuestion[];
+    textSummary: string;
+    latencyMs: number;
+    count: number;
+    topic: string;
+  }> {
+    const startTime = Date.now();
+    const intent = parseUserPromptIntent(userPrompt, topicOverride || "Clinical Medicine & Pathophysiology");
+    const count = countOverride !== undefined && countOverride > 0 ? countOverride : intent.count;
+    const topic = topicOverride || intent.topic;
+    const isHarder = intent.isHarder;
+    const isComplex = intent.isComplex;
+
+    // Batch in groups of 5 cases for maximum depth and to prevent truncation
+    const batchSizes: number[] = [];
+    let remaining = count;
+    while (remaining > 0) {
+      const b = Math.min(remaining, 5);
+      batchSizes.push(b);
+      remaining -= b;
+    }
+
+    let currentCaseOffset = 0;
+    const batchPromises = batchSizes.map((batchCount, batchIdx) => {
+      const offset = currentCaseOffset;
+      currentCaseOffset += batchCount;
+      return this.generateLongCaseBatch(
+        topic,
+        batchCount,
+        offset,
+        isHarder,
+        isComplex,
+        userPrompt,
+        batchIdx,
+        batchSizes.length,
+        attachments,
+        chatId
+      );
+    });
+
+    const batchResults = await Promise.all(batchPromises);
+    let allCases: LongTextCaseQuestion[] = [];
+    for (const batch of batchResults) {
+      allCases.push(...batch);
+    }
+
+    // Fallback if empty
+    if (allCases.length === 0) {
+      allCases = [
+        {
+          caseNumber: 1,
+          title: `Comprehensive Clinical Case: ${topic}`,
+          vignette: `A 58-year-old patient presents to the emergency department with a 3-day history of worsening clinical symptoms. Past medical history is notable for hypertension and hyperlipidemia. Vital signs on presentation reveal blood pressure 148/92 mmHg, pulse 88 bpm, respiratory rate 18 breaths/min, and oxygen saturation 97% on ambient air. Physical examination reveals unremarkable cardiorespiratory findings. Laboratory workup and targeted diagnostic testing are initiated.`,
+          question: `Which of the following pathophysiological mechanisms or therapeutic interventions is most appropriate for this patient?`,
+          options: [
+            "A) First-line targeted pharmacological intervention",
+            "B) Alternative secondary pathway inhibition",
+            "C) Distractor option testing atypical manifestation",
+            "D) Contraindicated drug class in this setting",
+            "E) Observation with serial biomarker monitoring"
+          ],
+          correctAnswer: "A) First-line targeted pharmacological intervention",
+          mechanism: `The primary cellular and organ-system mechanism underlying this condition involves targeted receptor modulation and restoring physiologic homeostasis.`,
+          distractorAnalysis: `Options B, C, D, and E represent common clinical distractors that apply in distinct etiologies or alternative stages of disease.`,
+          clinicalPearl: `Always anchor diagnostic reasoning on key chronological markers and vitals before finalizing the pharmacological intervention.`,
+        }
+      ];
+    }
+
+    allCases = allCases.slice(0, count);
+    for (let i = 0; i < allCases.length; i++) {
+      allCases[i].caseNumber = i + 1;
+    }
+
+    this.stats.mcqsGenerated += allCases.length;
+    const latencyMs = Date.now() - startTime;
+
+    const textSummary = allCases
+      .map((c) => {
+        const title = `### **Case ${c.caseNumber} of ${allCases.length}: ${c.title || topic}**\n\n`;
+        const vig = `**Clinical Presentation & Vignette:**\n${c.vignette}\n\n`;
+        const q = `**Question:**\n${c.question}\n\n`;
+        const opts = `**Options:**\n${c.options.join("\n")}\n\n`;
+        const ans = `✅ **Correct Answer:** ${c.correctAnswer}\n\n`;
+        const mech = `🧬 **Pathophysiological Mechanism:**\n${c.mechanism}\n\n`;
+        const dist = `🎯 **Distractor Analysis:**\n${c.distractorAnalysis}\n\n`;
+        const pearl = `💡 **High-Yield Clinical Pearl:**\n${c.clinicalPearl}`;
+        return `${title}${vig}${q}${opts}${ans}${mech}${dist}${pearl}`;
+      })
+      .join("\n\n---\n\n");
+
+    return {
+      cases: allCases,
+      textSummary,
+      latencyMs,
+      count: allCases.length,
+      topic,
+    };
+  }
+
+  private async generateLongCaseBatch(
+    topic: string,
+    count: number,
+    caseOffset: number,
+    isHarder: boolean,
+    isComplex: boolean,
+    userPrompt: string,
+    batchIndex: number,
+    totalBatches: number,
+    attachments: MediaAttachment[] = [],
+    chatId?: number | string
+  ): Promise<LongTextCaseQuestion[]> {
+    const focus = totalBatches > 1
+      ? `(Batch ${batchIndex + 1} of ${totalBatches}: Focus on diverse patient presentations, rare vs common variants, and high-yield board scenarios for ${topic})`
+      : "";
+
+    const difficultyDirective = isHarder
+      ? `🔥 HARDER LEVEL DIRECTIVE: Formulate higher-order 2nd-order or 3rd-order diagnostic and mechanistic questions with tricky, plausible distractors, classic board traps, and subtle clinical clues.`
+      : "";
+
+    const complexityDirective = isComplex
+      ? `🧬 COMPLEX MULTIMORBID CASES: Include complex multi-organ disease presentations, atypical clinical courses, polypharmacy interactions, or nuanced management dilemmas.`
+      : "";
+
+    const prompt = `Generate exactly ${count} authentic, comprehensive, LONG-TEXT clinical case examination questions on "${topic}". ${focus}
+
+USER INSTRUCTIONS:
+The user requested: "${userPrompt}"
+${difficultyDirective}
+${complexityDirective}
+
+MANDATORY LONG VIGNETTE REQUIREMENTS:
+1. "vignette": MUST be an extensive, realistic 2-3 paragraph clinical vignette (200-350 words) including:
+   - Patient demographics, setting (Emergency Dept, Outpatient Clinic, ICU), and chronological timeline of symptoms.
+   - Past medical history, medications, allergies, and social/family history.
+   - Full Vital Signs (Temperature, HR, BP with orthostatics if relevant, RR, SpO2).
+   - Focused Physical Exam findings across multiple relevant organ systems.
+   - Complete Diagnostic Labs (CBC, comprehensive metabolic panel, arterial blood gas, specific cardiac/inflammatory biomarkers, CSF/synovial fluid, ECG findings, or Imaging reports).
+2. "question": High-order reasoning question stem testing mechanism, diagnosis, or pharmacotherapy.
+3. "options": Exactly 5 options labeled A) through E).
+4. "correctAnswer": Exact correct choice with letter and text.
+5. "mechanism": In-depth biological, physiological, or pharmacological explanation.
+6. "distractorAnalysis": Exhaustive breakdown of why each incorrect option is wrong and under what clinical scenario it would be chosen.
+7. "clinicalPearl": High-yield board exam takeaway or mnemonic.
+
+Respond ONLY with a valid JSON array of ${count} objects:
+[
+  {
+    "caseNumber": ${caseOffset + 1},
+    "title": "Descriptive Case Title (e.g. 54-Year-Old Male with Acute Epigastric Pain & Hypotension)",
+    "vignette": "Extensive 2-3 paragraph clinical vignette with full history, vitals, exam, and lab values...",
+    "question": "Which of the following is the most likely cellular mechanism...?",
+    "options": ["A) ...", "B) ...", "C) ...", "D) ...", "E) ..."],
+    "correctAnswer": "A) ...",
+    "mechanism": "Comprehensive pathophysiological mechanism breakdown...",
+    "distractorAnalysis": "Detailed distractor analysis explaining why B, C, D, E are incorrect...",
+    "clinicalPearl": "High-yield board pearl or exam trap..."
+  }
+]`;
+
+    try {
+      const { text: rawJson } = await generateGeminiReply(
+        prompt,
+        [],
+        "You are an elite Medical Board Examiner creating comprehensive, long-text clinical case question banks. Output valid JSON array only.",
+        0.4,
+        attachments,
+        this.config.model
+      );
+
+      const cleaned = rawJson.replace(/^```(json)?\s*/i, "").replace(/```\s*$/, "").trim();
+      const parsed = JSON.parse(cleaned);
+
+      if (Array.isArray(parsed)) {
+        return parsed;
+      } else if (parsed && typeof parsed === "object") {
+        return [parsed];
+      }
+      return [];
+    } catch (err) {
+      console.warn(`[Long Case Batch ${batchIndex + 1}] Error:`, err);
+      return [];
+    }
+  }
+
+  // Handle Long Text Case Questions Workflow in Telegram
+  public async handleLongTextCaseQuestions(
+    chatId: number | string,
+    sender: any,
+    userName: string,
+    userHandle: string | undefined,
+    text: string,
+    intent: UserPromptIntent,
+    attachments: MediaAttachment[] = []
+  ): Promise<void> {
+    const count = intent.count;
+    const topic = intent.topic;
+
+    await this.sendChatAction(chatId, "typing");
+    await this.sendMessage(
+      chatId,
+      `📚 *Generating ${count} comprehensive long-text clinical case question${count > 1 ? "s" : ""} on ${topic}...*\n${intent.isHarder ? "_Applying advanced board-level difficulty with 2nd/3rd-order reasoning..._\n" : ""}${intent.isComplex ? "_Structuring complex multimorbid cases and diagnostic dilemmas..._\n" : ""}_Preparing in-depth patient vignettes, physical exams, laboratory workups, and complete rationales..._`,
+      "Markdown"
+    );
+
+    try {
+      const { cases, textSummary, latencyMs } = await this.generateLongTextCaseQuestions(
+        text,
+        topic,
+        count,
+        attachments,
+        chatId
+      );
+
+      // Group cases into messages under 3500 chars each for clean, reliable delivery
+      const messagesToSend: string[] = [];
+      let currentMessage = "";
+
+      for (let i = 0; i < cases.length; i++) {
+        const c = cases[i];
+        const caseBlock = `📋 *CASE ${c.caseNumber} OF ${cases.length}: ${sanitizeTelegramMarkdown(c.title || topic)}*
+
+*Clinical Presentation & Patient Vignette:*
+${sanitizeTelegramMarkdown(c.vignette)}
+
+*Question:*
+${sanitizeTelegramMarkdown(c.question)}
+
+*Options:*
+${c.options.map((opt) => `${sanitizeTelegramMarkdown(opt)}`).join("\n")}
+
+*Answer & Educational Breakdown:*
+✅ *Correct Answer:* ${sanitizeTelegramMarkdown(c.correctAnswer)}
+
+🧬 *Pathophysiological Mechanism:*
+${sanitizeTelegramMarkdown(c.mechanism)}
+
+🎯 *Distractor Rationale:*
+${sanitizeTelegramMarkdown(c.distractorAnalysis)}
+
+💡 *Clinical Pearl:* ${sanitizeTelegramMarkdown(c.clinicalPearl)}`;
+
+        if (currentMessage.length + caseBlock.length + 20 > 3500 && currentMessage.length > 0) {
+          messagesToSend.push(currentMessage);
+          currentMessage = caseBlock;
+        } else {
+          currentMessage = currentMessage ? `${currentMessage}\n\n---\n\n${caseBlock}` : caseBlock;
+        }
+      }
+
+      if (currentMessage.length > 0) {
+        messagesToSend.push(currentMessage);
+      }
+
+      for (let i = 0; i < messagesToSend.length; i++) {
+        await this.sendMessage(chatId, messagesToSend[i], "Markdown");
+        if (i < messagesToSend.length - 1) {
+          await new Promise((r) => setTimeout(r, 200));
+        }
+      }
+
+      // Follow-up message with instant PDF export option
+      await this.sendMessage(
+        chatId,
+        `✅ *All ${cases.length} comprehensive clinical case questions on ${topic} delivered!*\n\n📄 _Tap_ *📄 Export PDF Notes* _or send_ \`/pdf\` _anytime to download this complete question bank as a PDF document._`,
+        "Markdown"
+      );
+
+      const history = this.chatHistories.get(chatId) || [];
+      history.push({ role: "user", text });
+      history.push({ role: "model", text: textSummary });
+      this.chatHistories.set(chatId, history.slice(-12));
+
+      this.lastBotResponseByChat.set(chatId, {
+        text: textSummary,
+        topic: `Long Case Questions (${topic})`,
+        sourceType: 'general',
+        timestamp: Date.now(),
+      });
+
+      this.logActivity({
+        id: `case-q-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+        chatId,
+        userName,
+        userHandle,
+        userMessage: text,
+        aiResponse: `[Long Case Questions: ${cases.length} cases on ${topic}]`,
+        latencyMs,
+        timestamp: new Date().toISOString(),
+        status: "success",
+        source: "telegram",
+      });
+    } catch (err: any) {
+      console.error("[Telegram] Long text case question generation error:", err);
+      await this.sendMessage(chatId, "⚠️ Error generating clinical case questions. Please try again or request a smaller batch.");
+    }
+  }
+
+  // Handle Interactive Quiz Polls Workflow in Telegram (Supports up to 50 polls!)
+  public async handleInteractiveQuizzes(
+    chatId: number | string,
+    sender: any,
+    userName: string,
+    userHandle: string | undefined,
+    text: string,
+    intent?: UserPromptIntent,
+    attachments: MediaAttachment[] = []
+  ): Promise<void> {
+    const promptIntent = intent || parseUserPromptIntent(text);
+    const count = promptIntent.count;
+    const topic = promptIntent.topic;
+    const allowScenario = promptIntent.allowScenario;
+
+    await this.sendChatAction(chatId, "typing");
+    if (count > 1) {
+      await this.sendMessage(
+        chatId,
+        `📚 *Generating ${count} interactive quiz poll${count > 1 ? "s" : ""} on ${topic}...*\n${promptIntent.isHarder ? "_Applying advanced board-level difficulty with 2nd/3rd-order reasoning..._\n" : ""}${promptIntent.isComplex ? "_Structuring complex multi-step reasoning questions..._\n" : ""}Sending Telegram polls sequentially:`,
+        "Markdown"
+      );
+    }
+
+    try {
+      const { quizzes, textSummary, latencyMs } = await this.generateInteractiveQuizzes(
+        text,
+        topic,
+        count,
+        attachments
+      );
+
+      for (let i = 0; i < quizzes.length; i++) {
+        const quiz = quizzes[i];
+
+        // Send patient vignette as clinical scenario if present
+        if (allowScenario && quiz.scenario && quiz.scenario.trim().length > 0) {
+          await this.sendMessage(
+            chatId,
+            `📋 *Clinical Case Vignette${quizzes.length > 1 ? ` (${i + 1}/${quizzes.length})` : ""}:*\n\n${quiz.scenario}`,
+            "Markdown"
+          );
+        }
+
+        // Format question stem (prefix with index if multiple quizzes)
+        const questionStem = quizzes.length > 1
+          ? `[${i + 1}/${quizzes.length}] ${quiz.question}`
+          : quiz.question;
+
+        // Send native Telegram interactive Quiz Poll
+        await this.sendPoll(
+          chatId,
+          questionStem.slice(0, 290),
+          quiz.options,
+          quiz.correctOptionId,
+          quiz.explanation,
+          false
+        );
+
+        // Delay slightly between polls to ensure clean order in Telegram
+        if (quizzes.length > 1 && i < quizzes.length - 1) {
+          await new Promise((resolve) => setTimeout(resolve, 250));
+        }
+      }
+
+      if (quizzes.length === 1) {
+        await this.sendMessage(
+          chatId,
+          `💡 *Tap your choice in the quiz above!* You'll see instant answer feedback and high-yield explanation.\n\n📄 _Want downloadable PDF notes? Reply with_ \`/pdf\` _anytime._`,
+          "Markdown"
+        );
+      } else {
+        await this.sendMessage(
+          chatId,
+          `✅ *All ${quizzes.length} interactive quiz polls on ${topic} delivered!*\n💡 Tap your choice on each poll above to test your recall.\n📄 _Reply with_ \`/pdf\` _anytime to export full questions and explanations to a PDF document._`,
+          "Markdown"
+        );
+      }
+
+      const history = this.chatHistories.get(chatId) || [];
+      history.push({ role: "user", text });
+      history.push({ role: "model", text: textSummary });
+      this.chatHistories.set(chatId, history.slice(-12));
+
+      this.lastBotResponseByChat.set(chatId, {
+        text: textSummary,
+        topic: `Interactive Quiz (${topic})`,
+        sourceType: 'quiz',
+        timestamp: Date.now(),
+      });
+
+      this.logActivity({
+        id: `quiz-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+        chatId,
+        userName,
+        userHandle,
+        userMessage: text,
+        aiResponse: `[Interactive Quiz: ${quizzes.length} poll(s) on ${topic}]`,
+        latencyMs,
+        timestamp: new Date().toISOString(),
+        status: "success",
+        source: "telegram",
+      });
+    } catch (err: any) {
+      console.error("[Telegram] Quiz generation error:", err);
+      await this.sendMessage(chatId, "⚠️ Error generating interactive quiz polls. Please try again.");
     }
   }
 
@@ -1794,16 +2322,115 @@ Medchat is equipped with multimodal perception powered by Google Gemini!
     }
   }
 
-  // Handle Medical Image (Histology, Radiology, ECG, Dermatology, Anatomy)
-  private async handleImageMessage(
+  // Media Batching & Multi-Image Album Queue
+  public queueMediaUpdate(
     chatId: number | string,
     sender: any,
     userName: string,
     userHandle: string | undefined,
-    fileId: string,
-    caption: string,
-    mimeType: string = "image/jpeg",
-    fileName?: string
+    item: PendingMediaBatchItem,
+    mediaGroupId?: string
+  ): void {
+    const batchKey = mediaGroupId ? `mg_${chatId}_${mediaGroupId}` : `burst_${chatId}`;
+    const existing = this.mediaBatchMap.get(batchKey);
+
+    if (existing) {
+      clearTimeout(existing.timer);
+      existing.items.push(item);
+      existing.timer = setTimeout(() => {
+        this.processMediaBatch(batchKey);
+      }, 850);
+    } else {
+      const timer = setTimeout(() => {
+        this.processMediaBatch(batchKey);
+      }, 850);
+
+      this.mediaBatchMap.set(batchKey, {
+        items: [item],
+        timer,
+        chatId,
+        sender,
+        userName,
+        userHandle,
+        startTime: Date.now(),
+      });
+    }
+  }
+
+  private async processMediaBatch(batchKey: string): Promise<void> {
+    const batch = this.mediaBatchMap.get(batchKey);
+    if (!batch) return;
+    this.mediaBatchMap.delete(batchKey);
+
+    const { chatId, sender, userName, userHandle, items } = batch;
+    if (items.length === 0) return;
+
+    // Combine any captions provided in the batch
+    const captions = items
+      .map((it) => it.caption?.trim())
+      .filter((c): c is string => Boolean(c && c.length > 0));
+    const combinedCaption = Array.from(new Set(captions)).join(" | ").trim();
+
+    // Check if this is a single PDF document
+    if (items.length === 1 && items[0].mimeType === "application/pdf") {
+      const it = items[0];
+      await this.handleDocumentMessage(
+        chatId,
+        sender,
+        userName,
+        userHandle,
+        { file_id: it.fileId, file_name: it.fileName || "medical_document.pdf", mime_type: "application/pdf" },
+        combinedCaption
+      );
+      return;
+    }
+
+    // Download all images in parallel
+    await this.sendChatAction(chatId, "typing");
+    if (items.length > 1) {
+      await this.sendMessage(
+        chatId,
+        `🩺 *Received ${items.length} medical images together!* Downloading and processing all slides/scans in parallel with Gemini multimodal vision...`,
+        "Markdown"
+      );
+    }
+
+    const downloadedAttachments: MediaAttachment[] = [];
+    const downloadPromises = items.map(async (it, idx) => {
+      try {
+        const filePath = await this.getTelegramFilePath(it.fileId);
+        if (!filePath) return;
+        const fileBuffer = await this.downloadTelegramFile(filePath);
+        if (!fileBuffer) return;
+        const detectedMime = it.mimeType || (filePath.endsWith(".png") ? "image/png" : "image/jpeg");
+        downloadedAttachments.push({
+          mimeType: detectedMime,
+          data: fileBuffer.toString("base64"),
+          fileName: it.fileName || `medical_image_${idx + 1}.jpg`,
+        });
+      } catch (err) {
+        console.warn(`[Telegram] Error downloading batch item ${idx + 1}:`, err);
+      }
+    });
+
+    await Promise.all(downloadPromises);
+
+    if (downloadedAttachments.length === 0) {
+      await this.sendMessage(chatId, "⚠️ Could not retrieve the uploaded image(s) from Telegram. Please try re-sending.");
+      return;
+    }
+
+    await this.handleBatchMediaMessage(chatId, sender, userName, userHandle, downloadedAttachments, combinedCaption);
+  }
+
+  // Handle Batch of 1 to 10+ Medical Images Analyzed Together
+  public async handleBatchMediaMessage(
+    chatId: number | string,
+    sender: any,
+    userName: string,
+    userHandle: string | undefined,
+    attachments: MediaAttachment[],
+    caption: string = ""
   ): Promise<void> {
     if (!this.config.botActive) {
       await this.sendMessage(chatId, "⚠️ The medical AI assistant is currently paused by the administrator.");
@@ -1816,96 +2443,72 @@ Medchat is equipped with multimodal perception powered by Google Gemini!
       this.stats.activeChatsCount++;
     }
 
+    const intent = parseUserPromptIntent(caption || "Medical Image Analysis");
+
+    // 1. If user explicitly requested interactive quiz polls based on the images
+    if (intent.isPollRequested || (caption && /\b(quizzes?|polls?|interactive quiz)\b/i.test(caption))) {
+      await this.handleInteractiveQuizzes(
+        chatId,
+        sender,
+        userName,
+        userHandle,
+        caption || `Interactive Quiz on ${attachments.length} Images`,
+        intent,
+        attachments
+      );
+      return;
+    }
+
+    // 2. If user requested long text case questions based on the images
+    if (intent.isTextCaseRequested || (intent.isLongCase && (intent.count > 1 || /\b(questions?|cases?)\b/i.test(caption)))) {
+      await this.handleLongTextCaseQuestions(
+        chatId,
+        sender,
+        userName,
+        userHandle,
+        caption || `Long Text Clinical Cases on ${attachments.length} Images`,
+        intent,
+        attachments
+      );
+      return;
+    }
+
+    // 3. Multimodal Analysis of All Images Together
     await this.sendChatAction(chatId, "typing");
-    await this.sendMessage(chatId, "🩺 *Analyzing medical image...* Examining cellular features, radiological findings, or anatomical structures with Gemini vision.", "Markdown");
-
-    const filePath = await this.getTelegramFilePath(fileId);
-    if (!filePath) {
-      await this.sendMessage(chatId, "⚠️ Could not retrieve the image from Telegram servers. Please re-upload or try again.");
-      return;
-    }
-
-    const fileBuffer = await this.downloadTelegramFile(filePath);
-    if (!fileBuffer) {
-      await this.sendMessage(chatId, "⚠️ Failed to download the image. Please try again.");
-      return;
-    }
-
-    const base64Data = fileBuffer.toString("base64");
-    const detectedMime = mimeType || (filePath.endsWith(".png") ? "image/png" : "image/jpeg");
-
-    const userWantsQuestion = Boolean(caption && /mcq|quiz|question|test|exam/i.test(caption));
-
-    if (userWantsQuestion) {
-      await this.sendMessage(chatId, `🎯 *Generating interactive quiz polls based on your uploaded image...*`, "Markdown");
-      try {
-        const { quizzes, textSummary } = await this.generateInteractiveQuizzes(
-          caption || "Medical Image Quiz",
-          fileName || "Image Analysis",
-          5,
-          [{ mimeType: detectedMime, data: base64Data, fileName: fileName || "medical_image.jpg" }]
-        );
-
-        for (let i = 0; i < quizzes.length; i++) {
-          const quiz = quizzes[i];
-          const questionStem = quizzes.length > 1 ? `[${i + 1}/${quizzes.length}] ${quiz.question}` : quiz.question;
-          await this.sendPoll(chatId, questionStem.slice(0, 290), quiz.options, quiz.correctOptionId, quiz.explanation, false);
-          if (quizzes.length > 1 && i < quizzes.length - 1) {
-            await new Promise((r) => setTimeout(r, 300));
-          }
-        }
-
-        await this.sendMessage(chatId, `💡 *Tap your choice in the polls above!* \n📄 _Reply with_ \`/pdf\` _anytime to export full questions and explanations to a PDF document._`, "Markdown");
-
-        const history = this.chatHistories.get(chatId) || [];
-        history.push({ role: 'user', text: `[Medical Image Uploaded with Quiz: ${caption}]` });
-        history.push({ role: 'model', text: textSummary });
-        this.chatHistories.set(chatId, history.slice(-12));
-
-        this.lastBotResponseByChat.set(chatId, {
-          text: textSummary,
-          topic: caption || "Image Quiz",
-          sourceType: 'quiz',
-          timestamp: Date.now(),
-        });
-        return;
-      } catch (err: any) {
-        console.error("[Telegram] Image quiz generation error:", err);
-      }
-    }
+    const numImages = attachments.length;
 
     const promptText = caption
-      ? `[User Medical Query with Image]: "${caption}"
+      ? `[USER QUERY & SPECIFIC INSTRUCTIONS ACCOMPANYING ${numImages} UPLOADED IMAGE(S)]:
+"${caption}"
 
-Please analyze this image with expert clinical, anatomical, and diagnostic precision:
-1. Address the user's specific query: "${caption}" thoroughly and directly.
-2. If this is an Anatomical Diagram, Cadaveric Dissection, or Cross-section:
-   - Identify every visible and labeled structure (muscles, origins/insertions, vessels, nerves, bones, organs).
-   - Detail their spatial relations (anterior/posterior, medial/lateral, superior/inferior), boundaries, and fascial planes.
-   - Detail neurovascular supply: arterial branches, venous drainage, nerve roots, and motor/sensory innervation.
-   - Clinical & surgical correlates: compression sites (e.g. carpal tunnel, cubital tunnel, thoracic outlet), danger zones, nerve palsy presentations, and functional tests.
-3. If this is Radiological Imaging (X-Ray, CT, MRI, Ultrasound):
-   - Modality, plane/projection, systematic survey, specific pathology/findings, and differential diagnosis with next diagnostic steps.
-4. If this is Histopathology / Micrograph:
-   - Tissue, staining, architectural pattern, cellular morphology, pathognomonic hallmarks, and disease pathophysiology.
-5. High-yield board exam pearls and mnemonics.
-${userWantsQuestion ? "Formulate 1 high-yield board exam practice MCQ based on this finding with correct answer and rationale." : "CRITICAL: DO NOT formulate or append any practice quiz or MCQ unless explicitly requested."}`
-      : `Analyze this medical image with rigorous clinical and anatomical precision:
+CRITICAL INSTRUCTIONS FOR MULTI-IMAGE CLINICAL ANALYSIS:
+1. Thoroughly and specifically address every question, request, or comparison the user specified in their prompt: "${caption}".
+2. Individual Image Breakdown:
+   - Systematically inspect each image (${numImages > 1 ? "Image 1 through Image " + numImages : "Image 1"}).
+   - Identify anatomical structures, relations, neurovascular supply, radiographic signs/densities, or cellular hallmarks/stains.
+3. Comparative & Cross-Image Correlation:
+   - Correlate findings across all ${numImages} image(s) (e.g. multi-plane views, disease progression, differential comparisons, histopathologic confirmation of radiology).
+4. Pathophysiological & Pharmacological Insights:
+   - Underlying cellular mechanisms, first-line clinical management, and diagnostic algorithms.
+5. High-Yield Board Exam Pearls & Mnemonics:
+   - Classic board associations, exam traps, and memorable high-yield takeaways.
+${intent.isHarder ? "\n🔥 HARDER LEVEL: Provide advanced subspecialty distinctions and challenging board pearls." : ""}
+${intent.isComplex ? "\n🧬 COMPLEXITY: Highlight atypical presentations and multidisciplinary management." : ""}`
+      : `Analyze all ${numImages} uploaded medical image(s) together with comprehensive anatomical, histological, and radiological precision:
 
-1. 🫀 **Anatomical & Structural Identification**:
-   - If Anatomical Diagram or Dissection: Identify every visible organ, muscle, bone, vessel, and nerve. Detail spatial relations (medial/lateral/anterior/posterior), fascial compartments, and boundaries.
-   - Specify neurovascular supply: arterial branches, venous drainage, nerve roots, and motor/sensory innervation.
-   - Clinical/Surgical Correlates: Common compression sites, surgical danger zones, nerve deficit presentations, and functional tests.
-2. 🔬 **Histopathology & Micrograph (if applicable)**:
-   - Tissue of origin, staining technique, architectural pattern, cellular hallmarks (e.g. inclusion bodies, pleomorphism, inflammatory cells), and definitive diagnosis.
-3. 🩻 **Radiology & Imaging (if applicable)**:
-   - Modality, plane/projection, systematic anatomical survey, specific density/intensity abnormalities, and prioritized differential diagnosis with next clinical steps.
-4. ⚡ **ECG / Rhythm Strip (if applicable)**:
-   - Rate, rhythm, axis, PR/QRS/QTc intervals, ST/T wave changes, and clinical interpretation.
-5. 💡 **High-Yield Board Exam Pearls & Mnemonics**:
-   - High-yield associations, embryological origins, and memorable mnemonics.
+1. 🫀 **Comprehensive Survey of Each Image (1 to ${numImages})**:
+   - For Anatomical Diagrams/Dissections: Identify every visible structure, spatial boundaries, neurovascular pedicles, and clinical relations.
+   - For Histopathology/Micrographs: Staining method, tissue of origin, pathognomonic cellular hallmarks (e.g. inclusion bodies, architectural disarray), and disease etiology.
+   - For Radiology/Imaging (X-ray, CT, MRI, US): Modality, projection, systematic survey, radiological signs, and tissue densities.
+   - For ECGs: Rate, rhythm, axis, intervals, ischemic changes, and chamber hypertrophy.
+2. 🔄 **Cross-Image Comparative Correlation**:
+   - Synthesize how the findings across these ${numImages} images integrate, compare, or contrast.
+3. 🧬 **Pathophysiological Mechanisms & Clinical Management**:
+   - Core molecular mechanisms, gold-standard workup, and first-line therapeutic interventions.
+4. 💡 **High-Yield Board Exam Pearls & Mnemonics**:
+   - High-yield USMLE / NEET-PG associations, buzzwords, and examiner traps to avoid.
 
-CRITICAL INSTRUCTION: DO NOT generate or append any multiple-choice questions (MCQs) or quiz questions. Provide expert clinical and anatomical analysis only.`;
+CRITICAL: DO NOT attach an unsolicited quiz or MCQ. Provide exhaustive clinical and anatomical synthesis only.`;
 
     const history = this.chatHistories.get(chatId) || [];
 
@@ -1915,30 +2518,23 @@ CRITICAL INSTRUCTION: DO NOT generate or append any multiple-choice questions (M
         history,
         this.getSystemPrompt(chatId),
         this.config.temperature,
-        [{ mimeType: detectedMime, data: base64Data, fileName: fileName || "medical_image.jpg" }],
+        attachments,
         this.config.model
       );
 
-      history.push({ role: 'user', text: `[Medical Image Uploaded${caption ? `: ${caption}` : ''}]` });
-      history.push({ role: 'model', text: reply });
-      if (history.length > 12) {
-        this.chatHistories.set(chatId, history.slice(-12));
-      } else {
-        this.chatHistories.set(chatId, history);
-      }
+      history.push({ role: "user", text: `[${numImages} Medical Images Uploaded${caption ? `: ${caption}` : ""}]` });
+      history.push({ role: "model", text: reply });
+      this.chatHistories.set(chatId, history.slice(-12));
 
-      // Record as the latest bot response for instant /pdf compilation
-      const detectedTopic = caption
-        ? caption.slice(0, 40)
-        : (fileName ? fileName.slice(0, 40) : "Anatomical & Medical Image Analysis");
+      const detectedTopic = caption ? caption.slice(0, 45) : `${numImages} Image Multimodal Analysis`;
       this.lastBotResponseByChat.set(chatId, {
         text: reply,
         topic: detectedTopic,
-        sourceType: 'image',
+        sourceType: "image",
         timestamp: Date.now(),
       });
 
-      this.stats.imagesProcessed++;
+      this.stats.imagesProcessed += numImages;
       this.totalLatencySum += latencyMs;
       this.totalLatencyCount++;
       this.stats.averageLatencyMs = Math.round(this.totalLatencySum / this.totalLatencyCount);
@@ -1946,38 +2542,53 @@ CRITICAL INSTRUCTION: DO NOT generate or append any multiple-choice questions (M
       await this.sendSmartMedicalMessage(chatId, reply, "Markdown");
 
       this.logActivity({
-        id: `img-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+        id: `img-batch-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
         chatId,
         userName,
         userHandle,
-        userMessage: caption ? `[Image] ${caption}` : `[Medical Image Upload]`,
+        userMessage: caption ? `[${numImages} Images] ${caption}` : `[${numImages} Medical Images]`,
         aiResponse: reply,
         latencyMs,
         timestamp: new Date().toISOString(),
-        status: 'success',
-        source: 'telegram',
-        mediaType: 'image',
-        fileName: fileName || 'image.jpg',
+        status: "success",
+        source: "telegram",
+        mediaType: "image",
       });
     } catch (err: any) {
-      console.error("[Telegram] Image processing error:", err);
+      console.error("[Telegram] Batch image processing error:", err);
       this.stats.totalErrors++;
-      await this.sendMessage(chatId, "⚠️ Failed to complete medical image analysis. Please try again with another image or lower resolution.");
-      this.logActivity({
-        id: `err-${Date.now()}`,
+      await this.sendMessage(
         chatId,
-        userName,
-        userHandle,
-        userMessage: caption ? `[Image Error] ${caption}` : `[Image Error]`,
-        aiResponse: "",
-        latencyMs: 0,
-        timestamp: new Date().toISOString(),
-        status: 'error',
-        errorMessage: err.message || "Image vision error",
-        source: 'telegram',
-        mediaType: 'image',
-      });
+        "⚠️ Failed to complete batch image analysis. Please try again with fewer images or lower resolution."
+      );
     }
+  }
+
+  // Handle Medical Image (Histology, Radiology, ECG, Dermatology, Anatomy)
+  private async handleImageMessage(
+    chatId: number | string,
+    sender: any,
+    userName: string,
+    userHandle: string | undefined,
+    fileId: string,
+    caption: string,
+    mimeType: string = "image/jpeg",
+    fileName?: string
+  ): Promise<void> {
+    this.queueMediaUpdate(
+      chatId,
+      sender,
+      userName,
+      userHandle,
+      {
+        fileId,
+        mimeType,
+        fileName: fileName || "medical_image.jpg",
+        caption,
+        messageId: Date.now(),
+        timestamp: Date.now(),
+      }
+    );
   }
 
   // Handle Medical Document (PDF, Lecture Slides, Clinical Guidelines, Notes)
@@ -2037,58 +2648,20 @@ CRITICAL INSTRUCTION: DO NOT generate or append any multiple-choice questions (M
 
     let promptText = "";
     let attachments: MediaAttachment[] = [];
-    const userWantsQuestion = Boolean(caption && /mcq|quiz|question|test|exam/i.test(caption));
+    const docIntent = parseUserPromptIntent(caption || `Document ${fileName}`);
 
-    if (userWantsQuestion) {
+    if (docIntent.isPollRequested || (caption && /\b(quizzes?|polls?)\b/i.test(caption))) {
       await this.sendMessage(chatId, `🎯 *Generating interactive quiz polls based on your uploaded document (${fileName})...*`, "Markdown");
-      try {
-        let requestedCount = 5;
-        if (caption) {
-          const parsed = parseQuizPrompt(caption);
-          if (parsed.count !== 1) {
-            requestedCount = parsed.count;
-          } else {
-            const numMatch = caption.match(/\b(\d+)\b/);
-            if (numMatch && parseInt(numMatch[1], 10) > 0 && parseInt(numMatch[1], 10) <= 50) {
-              requestedCount = parseInt(numMatch[1], 10);
-            }
-          }
-        }
+      const docAttachments: MediaAttachment[] = isPdf ? [{ mimeType: "application/pdf", data: fileBuffer.toString("base64"), fileName }] : [];
+      await this.handleInteractiveQuizzes(chatId, sender, userName, userHandle, caption || `Quiz on ${fileName}`, docIntent, docAttachments);
+      return;
+    }
 
-        const docAttachments: MediaAttachment[] = isPdf ? [{ mimeType: "application/pdf", data: fileBuffer.toString("base64"), fileName }] : [];
-        const { quizzes, textSummary } = await this.generateInteractiveQuizzes(
-          caption || `Quiz on ${fileName}`,
-          fileName.replace(/\.[^/.]+$/, ""),
-          requestedCount,
-          docAttachments
-        );
-
-        for (let i = 0; i < quizzes.length; i++) {
-          const quiz = quizzes[i];
-          const questionStem = quizzes.length > 1 ? `[${i + 1}/${quizzes.length}] ${quiz.question}` : quiz.question;
-          await this.sendPoll(chatId, questionStem.slice(0, 290), quiz.options, quiz.correctOptionId, quiz.explanation, false);
-          if (quizzes.length > 1 && i < quizzes.length - 1) {
-            await new Promise((r) => setTimeout(r, 300));
-          }
-        }
-
-        await this.sendMessage(chatId, `💡 *Tap your choice in the polls above!* \n📄 _Reply with_ \`/pdf\` _anytime to export full questions and explanations to a PDF document._`, "Markdown");
-
-        const history = this.chatHistories.get(chatId) || [];
-        history.push({ role: 'user', text: `[Document Uploaded with Quiz: ${fileName} - ${caption}]` });
-        history.push({ role: 'model', text: textSummary });
-        this.chatHistories.set(chatId, history.slice(-12));
-
-        this.lastBotResponseByChat.set(chatId, {
-          text: textSummary,
-          topic: caption || fileName,
-          sourceType: 'quiz',
-          timestamp: Date.now(),
-        });
-        return;
-      } catch (err: any) {
-        console.error("[Telegram] Document quiz generation error:", err);
-      }
+    if (docIntent.isTextCaseRequested || (docIntent.isLongCase && (docIntent.count > 1 || /\b(questions?|cases?)\b/i.test(caption)))) {
+      await this.sendMessage(chatId, `📚 *Generating clinical case questions based on your uploaded document (${fileName})...*`, "Markdown");
+      const docAttachments: MediaAttachment[] = isPdf ? [{ mimeType: "application/pdf", data: fileBuffer.toString("base64"), fileName }] : [];
+      await this.handleLongTextCaseQuestions(chatId, sender, userName, userHandle, caption || `Cases on ${fileName}`, docIntent, docAttachments);
+      return;
     }
 
     if (isPdf) {
@@ -2106,8 +2679,7 @@ Perform a thorough, expert-level clinical and scientific analysis of this docume
 2. 📋 **Executive Clinical & Scientific Summary** (Scope, disease definitions, diagnostic criteria, clinical takeaways).
 3. 🧬 **Core Pathophysiological / Pharmacological / Anatomical Mechanisms** (Cellular pathways, drug receptors, anatomical relationships).
 4. 💊 **Clinical Management & Therapeutics** (Gold standard tests, first-line pharmacotherapy, contraindications).
-5. 💡 **High-Yield Board Exam Pearls & Mnemonics** (Exam associations, classic buzzwords, common pitfalls).
-${userWantsQuestion ? "Include practice clinical MCQs with detailed explanations." : "CRITICAL: DO NOT append any MCQs or quiz questions unless explicitly requested."}`
+5. 💡 **High-Yield Board Exam Pearls & Mnemonics** (Exam associations, classic buzzwords, common pitfalls).`
         : `Thoroughly and comprehensively analyze this medical document ('${fileName}'):
 
 1. 📋 **Executive Clinical & Scientific Summary**:
@@ -2130,7 +2702,7 @@ ${textContent}
 ` + (caption
         ? `[User Query]: "${caption}"
 
-Address the user's query with expert medical reasoning, quoting and synthesizing the relevant portions of the document. Provide high-yield clinical insights.${userWantsQuestion ? " Include practice MCQs as requested." : " DO NOT generate practice MCQs."}`
+Address the user's query with expert medical reasoning, quoting and synthesizing the relevant portions of the document. Provide high-yield clinical insights.`
         : `Thoroughly review this medical document. Provide:
 1. 📋 **Executive Summary & High-Yield Concepts**
 2. 🧬 **Key Pathophysiological / Pharmacological Mechanisms**
@@ -2163,11 +2735,7 @@ Address the user's query with expert medical reasoning, quoting and synthesizing
 
       history.push({ role: 'user', text: `[Medical Document Uploaded: ${fileName}${caption ? ` - ${caption}` : ''}]` });
       history.push({ role: 'model', text: reply });
-      if (history.length > 12) {
-        this.chatHistories.set(chatId, history.slice(-12));
-      } else {
-        this.chatHistories.set(chatId, history);
-      }
+      this.chatHistories.set(chatId, history.slice(-12));
 
       // Record as the latest bot response for instant /pdf compilation
       const cleanDocTopic = caption ? caption.slice(0, 40) : fileName.replace(/\.[^/.]+$/, "").slice(0, 40);
@@ -2484,7 +3052,21 @@ _If you are the bot owner, activate admin mode with:_ \`/claimadmin <passcode>\`
     if (message.photo && Array.isArray(message.photo) && message.photo.length > 0) {
       const photo = message.photo[message.photo.length - 1]; // Highest resolution
       const caption = message.caption?.trim() || "";
-      await this.handleImageMessage(chatId, sender, userName, userHandle, photo.file_id, caption);
+      this.queueMediaUpdate(
+        chatId,
+        sender,
+        userName,
+        userHandle,
+        {
+          fileId: photo.file_id,
+          mimeType: "image/jpeg",
+          fileName: "medical_photo.jpg",
+          caption,
+          messageId: message.message_id || Date.now(),
+          timestamp: Date.now(),
+        },
+        message.media_group_id
+      );
       return;
     }
 
@@ -2492,9 +3074,41 @@ _If you are the bot owner, activate admin mode with:_ \`/claimadmin <passcode>\`
     if (message.document) {
       const doc = message.document;
       const caption = message.caption?.trim() || "";
-      // If it's an image sent as file/document
-      if (doc.mime_type && doc.mime_type.startsWith("image/")) {
-        await this.handleImageMessage(chatId, sender, userName, userHandle, doc.file_id, caption, doc.mime_type, doc.file_name);
+      const isImageFile = (doc.mime_type && doc.mime_type.startsWith("image/")) || /\.(png|jpe?g|webp|bmp|gif|tiff?)$/i.test(doc.file_name || "");
+      if (isImageFile) {
+        this.queueMediaUpdate(
+          chatId,
+          sender,
+          userName,
+          userHandle,
+          {
+            fileId: doc.file_id,
+            mimeType: doc.mime_type || "image/jpeg",
+            fileName: doc.file_name || "medical_image.jpg",
+            caption,
+            messageId: message.message_id || Date.now(),
+            timestamp: Date.now(),
+          },
+          message.media_group_id
+        );
+        return;
+      }
+      if (message.media_group_id) {
+        this.queueMediaUpdate(
+          chatId,
+          sender,
+          userName,
+          userHandle,
+          {
+            fileId: doc.file_id,
+            mimeType: doc.mime_type || "application/pdf",
+            fileName: doc.file_name || "medical_document.pdf",
+            caption,
+            messageId: message.message_id || Date.now(),
+            timestamp: Date.now(),
+          },
+          message.media_group_id
+        );
         return;
       }
       // Medical document (PDF, TXT, MD, etc.)
@@ -2624,107 +3238,51 @@ Medchat is equipped with multimodal perception powered by Google Gemini!
       return;
     }
 
-    // 4. Interactive Quiz Request (Triggered specifically when prompted with the word "quiz" or "quizzes")
+    // Parse user intent for count, difficulty, complexity, format (polls vs long cases)
+    const intent = parseUserPromptIntent(text);
+
+    // 4. Long Text Case Questions Request (e.g., "generate 50 long text case questions", "give me 10 complex cases", "harder cases on cardiology")
+    const isExplicitCaseQuestions =
+      intent.isTextCaseRequested ||
+      (intent.isLongCase && !intent.isPollRequested && (intent.count > 1 || /\b(questions?|cases?|items?|vignettes?)\b/i.test(text))) ||
+      /\b(long text (?:case )?questions?|case questions?|case vignettes?|clinical case questions?)\b/i.test(text);
+
+    if (isExplicitCaseQuestions) {
+      await this.handleLongTextCaseQuestions(chatId, sender, userName, userHandle, text, intent);
+      return;
+    }
+
+    // 5. Interactive Quiz Request (Triggered when prompted with quizzes/polls or interactive quiz)
     const isQuizWord =
+      intent.isPollRequested ||
       /\bquiz(?:zes)?\b/i.test(text) ||
       text.startsWith("/quiz") ||
-      text === "📊 Interactive Quiz";
+      text === "📊 Interactive Quiz" ||
+      (intent.count > 1 && /\b(polls?|poll questions?)\b/i.test(text));
 
     if (isQuizWord) {
-      await this.sendChatAction(chatId, "typing");
-      const parsed = parseQuizPrompt(text);
-      const count = parsed.count;
-      const topic = parsed.topic;
-      const allowScenario = parsed.allowScenario;
-
-      if (count > 1) {
-        await this.sendMessage(
-          chatId,
-          `📚 *Generating ${count} interactive quizzes on ${topic}...*\nSending Telegram polls sequentially:`,
-          "Markdown"
-        );
-      }
-
-      try {
-        const { quizzes, textSummary, latencyMs } = await this.generateInteractiveQuizzes(text);
-
-        for (let i = 0; i < quizzes.length; i++) {
-          const quiz = quizzes[i];
-
-          // Send patient vignette as clinical scenario ONLY if explicitly requested and present
-          if (allowScenario && quiz.scenario && quiz.scenario.trim().length > 0) {
-            await this.sendMessage(
-              chatId,
-              `📋 *Clinical Case Vignette${quizzes.length > 1 ? ` (${i + 1}/${quizzes.length})` : ""}:*\n\n${quiz.scenario}`,
-              "Markdown"
-            );
-          }
-
-          // Format question stem (prefix with index if multiple quizzes)
-          const questionStem = quizzes.length > 1
-            ? `[${i + 1}/${quizzes.length}] ${quiz.question}`
-            : quiz.question;
-
-          // Send native Telegram interactive Quiz Poll
-          await this.sendPoll(
-            chatId,
-            questionStem.slice(0, 290),
-            quiz.options,
-            quiz.correctOptionId,
-            quiz.explanation,
-            false
-          );
-
-          // Delay slightly between polls to ensure clean order
-          if (quizzes.length > 1 && i < quizzes.length - 1) {
-            await new Promise((resolve) => setTimeout(resolve, 300));
-          }
-        }
-
-        // Friendly follow-up instructions
-        if (quizzes.length === 1) {
-          await this.sendMessage(
-            chatId,
-            `💡 *Tap your choice in the quiz above!* You'll see instant answer feedback and high-yield explanation.\n\n📄 _Want downloadable PDF notes? Reply with_ \`/pdf\` _anytime._`,
-            "Markdown"
-          );
-        } else {
-          await this.sendMessage(
-            chatId,
-            `✅ *All ${quizzes.length} interactive quiz polls on ${topic} delivered!*\n💡 Tap your choice on each poll above to test your recall.\n📄 _Reply with_ \`/pdf\` _anytime to export full questions and explanations to a PDF document._`,
-            "Markdown"
-          );
-        }
-
-        const history = this.chatHistories.get(chatId) || [];
-        history.push({ role: "user", text });
-        history.push({ role: "model", text: textSummary });
-        this.chatHistories.set(chatId, history.slice(-12));
-
-        this.lastBotResponseByChat.set(chatId, {
-          text: textSummary,
-          topic: `Interactive Quiz (${topic})`,
-          sourceType: 'quiz',
-          timestamp: Date.now(),
-        });
-
-        this.logActivity({
-          id: `quiz-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
-          chatId,
-          userName,
-          userHandle,
-          userMessage: text,
-          aiResponse: `[Interactive Quiz: ${quizzes.length} poll(s) on ${topic}]`,
-          latencyMs,
-          timestamp: new Date().toISOString(),
-          status: "success",
-          source: "telegram",
-        });
-      } catch (err: any) {
-        console.error("[Telegram] Quiz generation error:", err);
-        await this.sendMessage(chatId, "⚠️ Error generating interactive quiz. Please try again.");
-      }
+      await this.handleInteractiveQuizzes(chatId, sender, userName, userHandle, text, intent);
       return;
+    }
+
+    // 6. Sensitivity Follow-ups (e.g., "make it harder", "harder", "more complex", "complex one", "longer ones")
+    const isDifficultyFollowup =
+      /^(?:make (?:it|them|the questions?|the cases?|the quiz)\s+)?(?:harder|more complex|complex|more difficult|tougher|longer|extended)(?:\s+ones?)?$/i.test(text.trim()) ||
+      /^generate (?:harder|more complex|complex|longer)(?:\s+ones?)?$/i.test(text.trim());
+
+    if (isDifficultyFollowup) {
+      const last = this.lastBotResponseByChat.get(chatId);
+      if (last?.sourceType === 'quiz') {
+        const enhancedText = `${text} on ${last.topic}`;
+        const followIntent = parseUserPromptIntent(enhancedText);
+        await this.handleInteractiveQuizzes(chatId, sender, userName, userHandle, enhancedText, followIntent);
+        return;
+      } else if (last?.sourceType === 'long_case') {
+        const enhancedText = `${text} on ${last.topic}`;
+        const followIntent = parseUserPromptIntent(enhancedText);
+        await this.handleLongTextCaseQuestions(chatId, sender, userName, userHandle, enhancedText, followIntent);
+        return;
+      }
     }
 
     // 5. General MCQ Requests (without the word "quiz") -> Generate Raw Text as of now
