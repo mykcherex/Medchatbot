@@ -7,6 +7,7 @@ import { DEFAULT_MEDICAL_PROMPT } from "../src/constants";
 import { BotPersistenceService } from "./botPersistence";
 import { cleanAndFormatMedicalText, formatMedicalSymbols } from "./medicalFormatter";
 import { ChannelStorageService } from "./channelStorageService";
+import cron from "node-cron";
 
 export interface QuizData {
   scenario?: string;
@@ -290,6 +291,7 @@ class TelegramBotManager {
   private approvedUsernames: Set<string> = new Set();
   private pendingRequests: Map<number | string, PendingUserRequest> = new Map();
   private adminSecret: string = process.env.ADMIN_SECRET || "medadmin2026";
+  private autoPostTopics: string[] = [];
 
   private config = {
     systemInstruction: DEFAULT_MEDICAL_PROMPT,
@@ -364,6 +366,8 @@ class TelegramBotManager {
           this.customSystemPrompts.set(cId, prompt);
         }
       }
+
+      this.autoPostTopics = savedState.autoPostTopics || [];
     } catch (err) {
       console.error("[Telegram] Error loading persistent bot state:", err);
     }
@@ -396,6 +400,76 @@ class TelegramBotManager {
     setInterval(() => {
       this.syncAdminsFromChannel().catch(() => {});
     }, 60000);
+
+    // 5. Initialize Daily Cron Jobs
+    this.initCronJobs();
+  }
+
+  private initCronJobs() {
+    // Schedule for 08:00 AM (05:00 UTC) and 08:00 PM (17:00 UTC) EAT
+    // We will use standard daily schedule: 08:00 AM and 08:00 PM local server time.
+    cron.schedule("0 8,20 * * *", () => {
+      console.log("[Cron] Executing daily clinical vignette post...");
+      this.postDailyVignette().catch(err => {
+        console.error("[Cron] Error posting daily vignette:", err);
+      });
+    });
+  }
+
+  public async postDailyVignette(forcedTopic?: string): Promise<boolean> {
+    const channelId = "@M_T_C_ethiopia";
+    let topicToPost = forcedTopic;
+
+    if (!topicToPost) {
+      if (this.autoPostTopics.length === 0) {
+        console.warn("[Cron] No topics available for daily auto-post. Skipping.");
+        return false;
+      }
+      // Pick a random topic from the list
+      const randomIndex = Math.floor(Math.random() * this.autoPostTopics.length);
+      topicToPost = this.autoPostTopics[randomIndex];
+    }
+
+    try {
+      const prompt = `Generate a highly challenging, USMLE-style Clinical Vignette (Multiple Choice Question) focusing on the following topic: ${topicToPost}. 
+Return ONLY a strictly valid JSON array with 1 object matching this schema:
+[{
+  "scenario": "A 45-year-old male presents with...",
+  "question": "What is the most likely diagnosis?",
+  "options": ["Option A", "Option B", "Option C", "Option D"],
+  "correctOptionId": 0,
+  "explanation": "Short 1-sentence explanation of the correct answer.",
+  "fullRationale": "Detailed explanation of why the right answer is correct and why the others are wrong."
+}]
+Do not use markdown blocks around the JSON.`;
+
+      const { text } = await generateGeminiReply(prompt, [], this.config.systemInstruction, 0.7, [], this.config.model);
+      const cleanJsonStr = text.replace(/^```json\s*/, "").replace(/```$/, "").trim();
+      
+      const parsedQuizzes = JSON.parse(cleanJsonStr) as QuizData[];
+      if (!parsedQuizzes || parsedQuizzes.length === 0) return false;
+
+      const q = parsedQuizzes[0];
+      const pollQuestionText = `${q.scenario ? q.scenario + "\n\n" : ""}${q.question}`.slice(0, 300); // Telegram limit
+
+      // Send the poll to the channel
+      await this.sendPoll(
+        channelId,
+        pollQuestionText,
+        q.options,
+        q.correctOptionId,
+        q.explanation
+      );
+
+      // We can also post the full rationale as a spoiler-tagged message replying to the poll, but sendPoll doesn't easily return the message_id unless we parse it.
+      // Wait, sendPoll returns a boolean. If we change it to return the message, we could reply. 
+      // For now, the poll explanation is visible when they answer.
+      console.log(`[Cron] Successfully posted vignette on "${topicToPost}" to ${channelId}`);
+      return true;
+    } catch (err) {
+      console.error("[Cron] Failed to post daily vignette:", err);
+      return false;
+    }
   }
 
   /**
@@ -451,6 +525,11 @@ class TelegramBotManager {
               changed = true;
             }
           }
+        }
+
+        if (backupState.autoPostTopics) {
+          this.autoPostTopics = backupState.autoPostTopics;
+          changed = true;
         }
 
         if (changed) {
@@ -523,6 +602,7 @@ class TelegramBotManager {
       state.customSystemPrompts = Object.fromEntries(
         Array.from(this.customSystemPrompts.entries()).map(([k, v]) => [String(k), v])
       );
+      state.autoPostTopics = this.autoPostTopics || [];
       state.stats = { ...this.stats };
 
       // 1. Save synchronously to local disk
@@ -3492,6 +3572,41 @@ _If you are the bot owner, activate admin mode with:_ \`/claimadmin <passcode>\`
         return;
       }
 
+      if (text.startsWith("/autopost")) {
+        const parts = text.split(" ");
+        const action = parts[1]?.toLowerCase();
+        const arg = parts.slice(2).join(" ").trim();
+
+        if (action === "add" && arg) {
+          this.autoPostTopics.push(arg);
+          this.syncAndPersistState();
+          await this.sendMessage(chatId, `✅ Topic added for daily auto-post: *${arg}*`, "Markdown");
+        } else if (action === "remove" && arg) {
+          const initialLength = this.autoPostTopics.length;
+          this.autoPostTopics = this.autoPostTopics.filter(t => t.toLowerCase() !== arg.toLowerCase());
+          if (this.autoPostTopics.length < initialLength) {
+            this.syncAndPersistState();
+            await this.sendMessage(chatId, `🗑️ Topic removed: *${arg}*`, "Markdown");
+          } else {
+            await this.sendMessage(chatId, `⚠️ Topic not found: *${arg}*`, "Markdown");
+          }
+        } else if (action === "trigger") {
+          await this.sendMessage(chatId, `🚀 Triggering an immediate daily clinical vignette post...`);
+          const success = await this.postDailyVignette(arg || undefined);
+          await this.sendMessage(chatId, success ? `✅ Successfully posted vignette to @M_T_C_ethiopia` : `❌ Failed to post vignette.`);
+        } else {
+          let listMsg = `📅 *Daily Vignette Auto-Poster Topics*\n\n`;
+          if (this.autoPostTopics.length === 0) {
+            listMsg += `_No topics configured._\n`;
+          } else {
+            this.autoPostTopics.forEach((t, i) => listMsg += `${i + 1}. ${t}\n`);
+          }
+          listMsg += `\n*Commands:*\n• \`/autopost add <topic>\`\n• \`/autopost remove <topic>\`\n• \`/autopost trigger [optional_topic]\``;
+          await this.sendMessage(chatId, listMsg, "Markdown");
+        }
+        return;
+      }
+
       if (text === "/admin" || text === "/adminhelp") {
         const adminHelp = `👑 *Medchat Administrator Commands*
 
@@ -3503,6 +3618,7 @@ _If you are the bot owner, activate admin mode with:_ \`/claimadmin <passcode>\`
 • \`/toggleauth\` - Toggle private/public mode
 • \`/syncchannel\` or \`/backup\` - Force sync with channel cloud storage
 • \`/channel\` - View storage center status (t.me/theoutliness)
+• \`/autopost\` - Manage Daily Question Auto-Poster
 • \`/setprompt <prompt>\` - Set your custom prompt
 • \`/resetprompt\` - Reset system instructions`;
         await this.sendMessage(chatId, adminHelp, "Markdown");

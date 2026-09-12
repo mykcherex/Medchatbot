@@ -41,6 +41,7 @@ export interface BotPersistentState {
   adminSecret: string;
   config: BotConfigData;
   customSystemPrompts: Record<string, string>;
+  autoPostTopics: string[];
   stats: {
     totalMessages: number;
     totalErrors: number;
@@ -80,6 +81,7 @@ export function getDefaultBotState(): BotPersistentState {
       rapidFireCountdownSeconds: 30,
     },
     customSystemPrompts: {},
+    autoPostTopics: [],
     stats: {
       totalMessages: 0,
       totalErrors: 0,
