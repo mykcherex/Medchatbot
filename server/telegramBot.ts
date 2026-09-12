@@ -1406,7 +1406,8 @@ Tap an option below or send your first medical question to begin!`;
     correctOptionId: number,
     explanation?: string,
     isAnonymous: boolean = false,
-    openPeriodSeconds?: number
+    openPeriodSeconds?: number,
+    replyToMessageId?: number
   ): Promise<any> {
     try {
       const cleanOptions = options && options.length >= 2
@@ -1432,6 +1433,10 @@ Tap an option below or send your first medical question to begin!`;
         payload.open_period = Math.round(openPeriodSeconds);
       }
 
+      if (replyToMessageId) {
+        payload.reply_to_message_id = replyToMessageId;
+      }
+
       const res = await fetch(`${this.getApiBase()}/sendPoll`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -1445,6 +1450,72 @@ Tap an option below or send your first medical question to begin!`;
     } catch (err) {
       console.error('[Telegram] sendPoll network error:', err);
       return { ok: false, error: err };
+    }
+  }
+
+  public async sendSmartQuiz(
+    chatId: number | string,
+    quiz: QuizData,
+    prefixStem?: string,
+    openPeriodSeconds?: number,
+    isAnonymous: boolean = false
+  ): Promise<void> {
+    const rawQuestion = prefixStem ? `${prefixStem} ${quiz.question}` : quiz.question;
+    const hasScenario = !!quiz.scenario && quiz.scenario.trim().length > 0;
+    
+    // If the question alone exceeds Telegram's limit (300) OR there is a scenario, we split it up.
+    if (rawQuestion.length > 290 || hasScenario) {
+      const fullText = `📋 *Clinical Vignette:*\n\n${hasScenario ? quiz.scenario + "\n\n" : ""}${rawQuestion}`;
+      
+      const msgRes = await fetch(`${this.getApiBase()}/sendMessage`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          chat_id: chatId,
+          text: fullText.slice(0, 4000),
+          parse_mode: "Markdown"
+        })
+      });
+      const msgData = await msgRes.json();
+      const replyToId = msgData?.ok ? msgData.result?.message_id : undefined;
+
+      const pollData = await this.sendPoll(
+        chatId,
+        "💡 Select your answer below:",
+        quiz.options,
+        quiz.correctOptionId,
+        quiz.explanation,
+        isAnonymous,
+        openPeriodSeconds,
+        replyToId
+      );
+
+      // If there's a full rationale (usually for daily posts, but could be present here)
+      if (quiz.fullRationale && pollData?.ok) {
+        const safeRationale = quiz.fullRationale.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+        await fetch(`${this.getApiBase()}/sendMessage`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            chat_id: chatId,
+            text: `<b>Rationale:</b>\n<tg-spoiler>${safeRationale}</tg-spoiler>`,
+            parse_mode: "HTML",
+            reply_to_message_id: pollData.result.message_id
+          })
+        });
+      }
+
+    } else {
+      // It fits perfectly in a regular poll
+      await this.sendPoll(
+        chatId,
+        rawQuestion,
+        quiz.options,
+        quiz.correctOptionId,
+        quiz.explanation,
+        isAnonymous,
+        openPeriodSeconds
+      );
     }
   }
 
@@ -2452,18 +2523,15 @@ ${sanitizeTelegramMarkdown(c.distractorAnalysis)}
         }
 
         // Format question stem (prefix with index if multiple quizzes)
-        const questionStem = quizzes.length > 1
-          ? `[${i + 1}/${quizzes.length}] ${quiz.question}`
-          : quiz.question;
+        const prefix = quizzes.length > 1
+          ? `[${i + 1}/${quizzes.length}]`
+          : undefined;
 
         // Send native Telegram interactive Quiz Poll
-        await this.sendPoll(
+        await this.sendSmartQuiz(
           chatId,
-          questionStem.slice(0, 290),
-          quiz.options,
-          quiz.correctOptionId,
-          quiz.explanation,
-          false
+          quiz,
+          prefix
         );
 
         // Delay slightly between polls to ensure clean order in Telegram
@@ -2558,16 +2626,13 @@ ${sanitizeTelegramMarkdown(c.distractorAnalysis)}
         const quiz = quizzes[i];
 
         // Format question stem with rapid fire indicator and countdown timer badge
-        const questionStem = `[⚡️ Q${i + 1}/${quizzes.length} • ⏱️${clampedTimer}s] ${quiz.question}`;
+        const prefix = `[⚡️ Q${i + 1}/${quizzes.length} • ⏱️${clampedTimer}s]`;
 
         // Send native Telegram interactive Quiz Poll with open_period active countdown timer
-        await this.sendPoll(
+        await this.sendSmartQuiz(
           chatId,
-          questionStem.slice(0, 290),
-          quiz.options,
-          quiz.correctOptionId,
-          quiz.explanation,
-          false,
+          quiz,
+          prefix,
           clampedTimer
         );
 
@@ -2732,11 +2797,7 @@ ${sanitizeTelegramMarkdown(c.distractorAnalysis)}
         const cleanSubject = subject === "random" ? "General Medical Board Review" : subject;
         const { quiz, textSummary, latencyMs } = await this.generateInteractiveQuiz(cleanSubject);
 
-        if (quiz.scenario && quiz.scenario.trim().length > 0) {
-          await this.sendMessage(chatId, `📋 *Clinical Case Vignette:*\n\n${quiz.scenario}`, "Markdown");
-        }
-
-        await this.sendPoll(chatId, quiz.question, quiz.options, quiz.correctOptionId, quiz.explanation, false);
+        await this.sendSmartQuiz(chatId, quiz);
         await this.sendMessage(
           chatId,
           `💡 *Select your answer above!* Instant explanation will appear.\n📄 _Type_ \`/pdf\` _to download complete notes._`,
