@@ -1,6 +1,7 @@
 import { generateGeminiReply, ConversationTurn, MediaAttachment } from "./geminiService";
 import { detectImageRequest, searchMedicalImages, searchMedicalImage, ImageSearchResult } from "./imageSearchService";
 import { generateMedicalPdf } from "./pdfService";
+import { generateMedicalPpt } from "./pptService";
 import { extractMarkdownTables, renderTableToPngBuffer } from "./tableImageService";
 import { DEFAULT_MEDICAL_PROMPT } from "../src/constants";
 import { BotPersistenceService } from "./botPersistence";
@@ -384,7 +385,10 @@ class TelegramBotManager {
     this.syncAndPersistState();
 
     // 3. Initiate immediate Channel storage admin sync from @theoutliness
-    this.syncAdminsFromChannel().catch(err => {
+    // First restore any authorized users from the pinned backup in case disk was wiped
+    this.restoreStateFromChannelBackup().then(() => {
+      return this.syncAdminsFromChannel();
+    }).catch(err => {
       console.warn("[TelegramBot] Initial channel sync warning:", err);
     });
 
@@ -392,6 +396,71 @@ class TelegramBotManager {
     setInterval(() => {
       this.syncAdminsFromChannel().catch(() => {});
     }, 60000);
+  }
+
+  /**
+   * Restores state from the pinned backup message in the Telegram channel to survive container restarts
+   */
+  public async restoreStateFromChannelBackup(): Promise<void> {
+    try {
+      const channelStorage = ChannelStorageService.getInstance();
+      const backupState = await channelStorage.restoreStateFromChannel(this.token);
+
+      if (backupState) {
+        let changed = false;
+
+        if (backupState.adminChatIds) {
+          for (const id of backupState.adminChatIds) {
+            const num = Number(id);
+            const validId = !isNaN(num) ? num : id;
+            if (!this.adminChatIds.has(validId)) {
+              this.adminChatIds.add(validId);
+              changed = true;
+            }
+          }
+        }
+
+        if (backupState.adminUsernames) {
+          for (const u of backupState.adminUsernames) {
+            const clean = u.replace(/^@/, '').toLowerCase().trim();
+            if (!this.adminUsernames.has(clean)) {
+              this.adminUsernames.add(clean);
+              changed = true;
+            }
+          }
+        }
+
+        if (backupState.approvedUsers) {
+          for (const user of backupState.approvedUsers) {
+            const key = String(user.chatId).trim();
+            if (!this.approvedUsers.has(key)) {
+              this.approvedUsers.set(key, user);
+              changed = true;
+            }
+            if (user.username) {
+              const clean = user.username.replace(/^@/, '').toLowerCase().trim();
+              this.approvedUsernames.add(clean);
+            }
+          }
+        }
+
+        if (backupState.customSystemPrompts) {
+          for (const [cId, prompt] of Object.entries(backupState.customSystemPrompts)) {
+            if (!this.customSystemPrompts.has(cId)) {
+              this.customSystemPrompts.set(cId, prompt);
+              changed = true;
+            }
+          }
+        }
+
+        if (changed) {
+          console.log("[TelegramBot] Restored state from channel backup.");
+          this.syncAndPersistState();
+        }
+      }
+    } catch (err) {
+      console.warn("[TelegramBot] Error restoring state from channel backup:", err);
+    }
   }
 
   /**
@@ -1314,6 +1383,87 @@ Tap an option below or send your first medical question to begin!`;
       console.error("[Telegram] download file error:", err);
       return null;
     }
+  }
+
+  // Automated PPT Compiler & Exporter
+  public async compileAndSendMedicalPpt(
+    chatId: number | string,
+    requestedTopic?: string,
+    fallbackText?: string
+  ): Promise<boolean> {
+    await this.sendChatAction(chatId, "upload_document");
+
+    const history = this.chatHistories.get(chatId) || [];
+    const lastBotResp = this.lastBotResponseByChat.get(chatId);
+    const lastModelTurn = [...history].reverse().find((t) => t.role === "model");
+
+    let cleanTopic = (requestedTopic || "").trim();
+    if (
+      !cleanTopic ||
+      /^(ppt|pptx|convert to ppt|make ppt|download ppt|export ppt|notes|this|it|previous response|last response|last message)$/i.test(cleanTopic)
+    ) {
+      cleanTopic = "";
+    }
+
+    let sourceContent =
+      lastBotResp?.text ||
+      lastModelTurn?.text ||
+      fallbackText ||
+      "";
+
+    if (!sourceContent && cleanTopic && cleanTopic.length > 2) {
+      try {
+        await this.sendMessage(
+          chatId,
+          `⚙️ *Generating presentation on ${cleanTopic}...*\n_Preparing clinical content and compiling PPT..._`,
+          "Markdown"
+        );
+        const { text: generatedText } = await generateGeminiReply(
+          `Provide an exhaustive, high-yield clinical study guide on: "${cleanTopic}". Include core pathophysiology, diagnostic workup, first-line pharmacotherapy, and clinical pearls.`,
+          [],
+          this.getSystemPrompt(chatId),
+          0.3,
+          [],
+          this.config.model
+        );
+        sourceContent = generatedText;
+        this.lastBotResponseByChat.set(chatId, {
+          text: generatedText,
+          topic: cleanTopic,
+          sourceType: 'general',
+          timestamp: Date.now(),
+        });
+      } catch (err: any) {
+        console.error("[Telegram] Error generating medical content for PPT:", err);
+      }
+    }
+
+    if (!sourceContent) {
+      await this.sendMessage(
+        chatId,
+        "ℹ️ *No previous response found to convert to PPT.*\n\nAsk any clinical question, request MCQs, or generate notes first, then send `/ppt` to download your presentation instantly!",
+        "Markdown"
+      );
+      return false;
+    }
+
+    try {
+      const docTitle = cleanTopic || lastBotResp?.topic || "Medical Study Notes";
+      const pptBuffer = await generateMedicalPpt(sourceContent, docTitle);
+      
+      const safeFileName = `${docTitle.replace(/[^a-zA-Z0-9]/g, "_").slice(0, 32)}.pptx`;
+      const success = await this.sendDocument(chatId, pptBuffer, safeFileName, `📊 **${docTitle}**\n_Auto-compiled Presentation_`);
+
+      if (success) {
+        this.stats.documentsProcessed++;
+        this.syncAndPersistState();
+        return true;
+      }
+    } catch (err) {
+      console.error("[Telegram] Error compiling PPT:", err);
+      await this.sendMessage(chatId, "⚠️ Failed to compile the presentation document. Please try again.");
+    }
+    return false;
   }
 
   // Automated PDF Compiler & Exporter (Compiles previous response directly without extra Gemini prompts)
@@ -2880,10 +3030,17 @@ CRITICAL: DO NOT attach an unsolicited quiz or MCQ. Provide exhaustive clinical 
 
     const isPdf = mimeType === "application/pdf" || fileName.toLowerCase().endsWith(".pdf");
     const isText = mimeType.startsWith("text/") || fileName.toLowerCase().endsWith(".txt") || fileName.toLowerCase().endsWith(".md") || fileName.toLowerCase().endsWith(".csv") || fileName.toLowerCase().endsWith(".json");
+    const isPpt = fileName.toLowerCase().endsWith(".ppt") || fileName.toLowerCase().endsWith(".pptx") || mimeType.includes("presentation");
 
     let promptText = "";
     let attachments: MediaAttachment[] = [];
     const docIntent = parseUserPromptIntent(caption || `Document ${fileName}`);
+
+    // Skip Gemini analysis for PPT files if we don't want to compile text in a PPT
+    if (isPpt) {
+      await this.sendMessage(chatId, `📊 *Presentation File Received:* \`${fileName}\`\n\n_Note: PowerPoint (PPT/PPTX) files are safely stored but not currently parsed by the AI for text compilation. To extract text, please upload as a PDF._`, "Markdown");
+      return;
+    }
 
     if (docIntent.isPollRequested || (caption && /\b(quizzes?|polls?)\b/i.test(caption))) {
       await this.sendMessage(chatId, `🎯 *Generating interactive quiz polls based on your uploaded document (${fileName})...*`, "Markdown");
@@ -3532,6 +3689,11 @@ Medchat is equipped with multimodal perception powered by Google Gemini!
       text === "📄 Export PDF Notes" ||
       /\b(pdf|convert to pdf|download as pdf|download pdf|save as pdf|export pdf|send pdf|make pdf|make a pdf|create pdf|create a pdf|generate pdf|generate a pdf|compile (?:to|into|as)? pdf|give me (?:a\s+)?pdf)\b/i.test(text);
 
+    const isPptRequest =
+      text.startsWith("/ppt") ||
+      text === "📊 Export PPT Notes" ||
+      /\b(ppt|pptx|convert to ppt|download as ppt|download ppt|save as ppt|export ppt|send ppt|make ppt|make a ppt|create ppt|create a ppt|generate ppt|generate a ppt|compile (?:to|into|as)? ppt|give me (?:a\s+)?ppt)\b/i.test(text);
+
     if (isPdfRequest) {
       let topic = text
         .replace(/^\/(?:pdf|download)\s*/i, "")
@@ -3540,6 +3702,17 @@ Medchat is equipped with multimodal perception powered by Google Gemini!
         .trim();
 
       await this.compileAndSendMedicalPdf(chatId, topic);
+      return;
+    }
+
+    if (isPptRequest) {
+      let topic = text
+        .replace(/^\/(?:ppt)\s*/i, "")
+        .replace(/^(?:can\s+you\s+)?(?:please\s+)?(?:convert|download|save|send|make|create|generate|compile|export)\s+(?:this\s+|it\s+|last\s+response\s+|previous\s+response\s+)?(?:to\s+|as\s+|into\s+)?(?:a\s+)?ppt\s*(?:of\s+|about\s+|on\s+)?/i, "")
+        .replace(/\b(?:as\s+|in\s+)?pptx?\b/gi, "")
+        .trim();
+
+      await this.compileAndSendMedicalPpt(chatId, topic);
       return;
     }
 

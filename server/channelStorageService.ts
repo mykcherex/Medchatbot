@@ -160,7 +160,20 @@ export class ChannelStorageService {
 
       const resData = await res.json() as any;
       if (resData && resData.ok) {
-        console.log(`[ChannelStorage] State successfully backed up to channel ${this.channelUsername}`);
+        const messageId = resData.result.message_id;
+        
+        // Pin the backup message so we can easily retrieve it on cold starts
+        await fetch(`https://api.telegram.org/bot${botToken}/pinChatMessage`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            chat_id: this.channelUsername,
+            message_id: messageId,
+            disable_notification: true
+          }),
+        }).catch(e => console.warn("[ChannelStorage] Failed to pin backup message:", e));
+
+        console.log(`[ChannelStorage] State successfully backed up & pinned to channel ${this.channelUsername}`);
         return true;
       } else {
         console.log(`[ChannelStorage] Channel backup note: ${resData?.description || 'Could not post to channel'}. Local disk storage maintained.`);
@@ -170,5 +183,39 @@ export class ChannelStorageService {
     }
 
     return false;
+  }
+
+  /**
+   * Attempts to restore the persistent state from the pinned backup message in the channel.
+   * This is critical for stateless environments (like Cloud Run) to survive restarts.
+   */
+  public async restoreStateFromChannel(botToken: string): Promise<Partial<BotPersistentState> | null> {
+    if (!botToken) return null;
+
+    try {
+      const url = `https://api.telegram.org/bot${botToken}/getChat`;
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ chat_id: this.channelUsername }),
+      });
+
+      const data = await res.json() as any;
+      if (data && data.ok && data.result?.pinned_message?.text) {
+        const text = data.result.pinned_message.text;
+        
+        // Extract JSON from the pinned message
+        const jsonMatch = text.match(/```json\n([\s\S]+?)\n```/);
+        if (jsonMatch && jsonMatch[1]) {
+          const parsed = JSON.parse(jsonMatch[1]);
+          console.log(`[ChannelStorage] Successfully restored state from pinned backup in ${this.channelUsername}`);
+          return parsed;
+        }
+      }
+    } catch (err) {
+      console.warn("[ChannelStorage] Failed to restore state from channel:", err);
+    }
+    
+    return null;
   }
 }
