@@ -149,6 +149,7 @@ export function parseUserPromptIntent(rawPrompt: string, defaultTopic: string = 
     isTextCaseRequested,
     isMcqRequested,
     isRapidFire,
+    isWebQuizRequested,
     customTimerSeconds,
     rawPrompt: text,
   };
