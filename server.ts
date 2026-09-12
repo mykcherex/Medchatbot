@@ -212,6 +212,15 @@ async function startServer() {
     res.json({ ok, status: telegramBot.getAccessControlStatus() });
   });
 
+  app.post("/api/access-control/remove-admin", (req, res) => {
+    const { identifier } = req.body;
+    if (!identifier) {
+      return res.status(400).json({ error: "Admin identifier is required" });
+    }
+    const ok = telegramBot.removeAdmin(identifier);
+    res.json({ ok, status: telegramBot.getAccessControlStatus() });
+  });
+
   // Telegram incoming Webhook endpoint
   app.post("/api/telegram/webhook", async (req, res) => {
     // Acknowledge update immediately to Telegram (HTTP 200)

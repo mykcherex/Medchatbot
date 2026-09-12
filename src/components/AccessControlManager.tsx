@@ -120,10 +120,27 @@ export function AccessControlManager() {
       if (res.ok) {
         setData(json.status);
         setAdminInput('');
-        setActionStatus({ type: 'success', message: `Added ${adminInput} as bot admin` });
+        setActionStatus({ type: 'success', message: `Added ${adminInput} as bot admin (Saved permanently)` });
       }
     } catch (err: any) {
       setActionStatus({ type: 'error', message: err.message || 'Failed to add admin' });
+    }
+  };
+
+  const handleRemoveAdmin = async (identifier: string) => {
+    try {
+      const res = await fetch('/api/access-control/remove-admin', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ identifier }),
+      });
+      const json = await res.json();
+      if (res.ok) {
+        setData(json.status);
+        setActionStatus({ type: 'success', message: `Removed ${identifier} from admins` });
+      }
+    } catch (err: any) {
+      setActionStatus({ type: 'error', message: err.message || 'Failed to remove admin' });
     }
   };
 
@@ -423,12 +440,22 @@ export function AccessControlManager() {
             </div>
 
             <div className="text-xs text-slate-300 space-y-1.5 pt-1 border-t border-slate-800">
-              <p className="font-semibold text-slate-200">Registered Admins ({data?.adminsCount || 0}):</p>
+              <div className="flex items-center justify-between">
+                <p className="font-semibold text-slate-200">Registered Admins ({data?.adminsCount || 0}):</p>
+                <span className="text-[10px] text-emerald-400 font-medium">💾 Stored Permanently</span>
+              </div>
               {data?.admins && data.admins.length > 0 ? (
                 <div className="flex flex-wrap gap-1.5">
                   {data.admins.map((a, i) => (
-                    <span key={i} className="px-2 py-0.5 bg-slate-800 rounded text-[11px] font-mono text-teal-300">
-                      {a.value}
+                    <span key={i} className="inline-flex items-center gap-1.5 px-2 py-0.5 bg-slate-800 rounded text-[11px] font-mono text-teal-300 border border-slate-700">
+                      <span>{a.value}</span>
+                      <button
+                        onClick={() => handleRemoveAdmin(a.value)}
+                        className="hover:text-rose-400 cursor-pointer transition-colors"
+                        title="Remove admin"
+                      >
+                        ×
+                      </button>
                     </span>
                   ))}
                 </div>

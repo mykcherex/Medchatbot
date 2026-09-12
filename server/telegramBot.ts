@@ -3,6 +3,7 @@ import { detectImageRequest, searchMedicalImages, searchMedicalImage, ImageSearc
 import { generateMedicalPdf } from "./pdfService";
 import { extractMarkdownTables, renderTableToPngBuffer } from "./tableImageService";
 import { DEFAULT_MEDICAL_PROMPT } from "../src/constants";
+import { BotPersistenceService } from "./botPersistence";
 
 export interface QuizData {
   scenario?: string;
@@ -208,6 +209,56 @@ class TelegramBotManager {
   constructor() {
     this.token = process.env.TELEGRAM_BOT_TOKEN || "8862664585:AAFVFulDGYrS_pPdfcFH-peILkbHZVi-84A";
 
+    // 1. Hydrate state from durable disk persistence
+    try {
+      const savedState = BotPersistenceService.getInstance().getState();
+      this.accessControlEnabled = savedState.accessControlEnabled;
+      if (savedState.adminSecret) {
+        this.adminSecret = savedState.adminSecret;
+      }
+      this.config = { ...this.config, ...savedState.config };
+
+      // Load adminChatIds
+      for (const id of savedState.adminChatIds || []) {
+        const num = Number(id);
+        this.adminChatIds.add(!isNaN(num) ? num : String(id).trim());
+      }
+
+      // Load adminUsernames
+      for (const u of savedState.adminUsernames || []) {
+        this.adminUsernames.add(u.replace(/^@/, '').toLowerCase().trim());
+      }
+
+      // Load approvedUsers
+      for (const user of savedState.approvedUsers || []) {
+        const key = String(user.chatId).trim();
+        this.approvedUsers.set(key, user);
+        if (user.username) {
+          this.approvedUsernames.add(user.username.replace(/^@/, '').toLowerCase().trim());
+        }
+      }
+
+      // Load approvedUsernames
+      for (const u of savedState.approvedUsernames || []) {
+        this.approvedUsernames.add(u.replace(/^@/, '').toLowerCase().trim());
+      }
+
+      // Load pendingRequests
+      for (const req of savedState.pendingRequests || []) {
+        this.pendingRequests.set(String(req.chatId).trim(), req);
+      }
+
+      // Load custom prompts
+      if (savedState.customSystemPrompts) {
+        for (const [cId, prompt] of Object.entries(savedState.customSystemPrompts)) {
+          this.customSystemPrompts.set(cId, prompt);
+        }
+      }
+    } catch (err) {
+      console.error("[Telegram] Error loading persistent bot state:", err);
+    }
+
+    // 2. Supplement with environment variables if specified
     if (process.env.ADMIN_TELEGRAM_ID) {
       process.env.ADMIN_TELEGRAM_ID.split(",").map(s => s.trim()).filter(Boolean).forEach(id => {
         const num = Number(id);
@@ -220,6 +271,32 @@ class TelegramBotManager {
         this.adminUsernames.add(u);
       });
     }
+
+    this.syncAndPersistState();
+  }
+
+  public syncAndPersistState(): void {
+    try {
+      const persistence = BotPersistenceService.getInstance();
+      const state = persistence.getState();
+
+      state.adminChatIds = Array.from(this.adminChatIds);
+      state.adminUsernames = Array.from(this.adminUsernames);
+      state.approvedUsers = Array.from(this.approvedUsers.values());
+      state.approvedUsernames = Array.from(this.approvedUsernames);
+      state.pendingRequests = Array.from(this.pendingRequests.values());
+      state.accessControlEnabled = this.accessControlEnabled;
+      state.adminSecret = this.adminSecret;
+      state.config = { ...this.config };
+      state.customSystemPrompts = Object.fromEntries(
+        Array.from(this.customSystemPrompts.entries()).map(([k, v]) => [String(k), v])
+      );
+      state.stats = { ...this.stats };
+
+      persistence.saveStateSync();
+    } catch (err) {
+      console.error("[Telegram] Failed to synchronize persistent state:", err);
+    }
   }
 
   public getApiBase(): string {
@@ -227,16 +304,59 @@ class TelegramBotManager {
   }
 
   public isAdmin(chatId: number | string, username?: string): boolean {
-    if (this.adminChatIds.has(chatId)) return true;
-    if (username && this.adminUsernames.has(username.replace(/^@/, '').toLowerCase())) return true;
+    const sId = String(chatId).trim();
+    const nId = Number(chatId);
+
+    // 1. Check direct admin chat ID match (string & numeric)
+    for (const id of this.adminChatIds) {
+      if (String(id).trim() === sId) return true;
+      if (!isNaN(nId) && Number(id) === nId) return true;
+    }
+
+    // 2. Check admin username match (case-insensitive, '@'-stripped)
+    if (username) {
+      const cleanUser = username.replace(/^@/, '').toLowerCase().trim();
+      if (cleanUser && this.adminUsernames.has(cleanUser)) return true;
+      for (const u of this.adminUsernames) {
+        if (u.replace(/^@/, '').toLowerCase().trim() === cleanUser) return true;
+      }
+    }
+
     return false;
   }
 
   public isAuthorized(chatId: number | string, username?: string): boolean {
     if (!this.accessControlEnabled) return true;
     if (this.isAdmin(chatId, username)) return true;
-    if (this.approvedUsers.has(chatId)) return true;
-    if (username && this.approvedUsernames.has(username.replace(/^@/, '').toLowerCase())) return true;
+
+    const sId = String(chatId).trim();
+    const nId = Number(chatId);
+
+    // 1. Direct Map Key check
+    if (this.approvedUsers.has(chatId) || this.approvedUsers.has(sId) || (!isNaN(nId) && this.approvedUsers.has(nId))) {
+      return true;
+    }
+
+    // 2. Iterate approvedUsers list for ID or username match
+    for (const [key, user] of this.approvedUsers.entries()) {
+      if (String(key).trim() === sId || String(user.chatId).trim() === sId) return true;
+      if (!isNaN(nId) && (Number(key) === nId || Number(user.chatId) === nId)) return true;
+      if (username && user.username) {
+        const u1 = user.username.replace(/^@/, '').toLowerCase().trim();
+        const u2 = username.replace(/^@/, '').toLowerCase().trim();
+        if (u1 && u1 === u2) return true;
+      }
+    }
+
+    // 3. Check approved usernames set
+    if (username) {
+      const cleanUser = username.replace(/^@/, '').toLowerCase().trim();
+      if (cleanUser && this.approvedUsernames.has(cleanUser)) return true;
+      for (const u of this.approvedUsernames) {
+        if (u.replace(/^@/, '').toLowerCase().trim() === cleanUser) return true;
+      }
+    }
+
     return false;
   }
 
@@ -248,8 +368,8 @@ class TelegramBotManager {
 
     // Search in pending requests
     for (const [cId, req] of this.pendingRequests.entries()) {
-      const matchChatId = String(cId) === raw;
-      const matchUsername = req.username && req.username.replace(/^@/, '').toLowerCase() === raw.replace(/^@/, '').toLowerCase();
+      const matchChatId = String(cId).trim() === raw;
+      const matchUsername = req.username && req.username.replace(/^@/, '').toLowerCase().trim() === raw.replace(/^@/, '').toLowerCase().trim();
       if (matchChatId || matchUsername) {
         targetChatId = cId;
         targetUsername = req.username;
@@ -261,15 +381,16 @@ class TelegramBotManager {
 
     if (!targetChatId) {
       if (raw.startsWith("@") || isNaN(Number(raw))) {
-        targetUsername = raw.replace(/^@/, '');
-        this.approvedUsernames.add(targetUsername.toLowerCase());
+        targetUsername = raw.replace(/^@/, '').toLowerCase().trim();
+        this.approvedUsernames.add(targetUsername);
       } else {
         targetChatId = Number(raw);
       }
     }
 
     if (targetChatId) {
-      this.approvedUsers.set(targetChatId, {
+      const key = String(targetChatId).trim();
+      this.approvedUsers.set(key, {
         chatId: targetChatId,
         username: targetUsername,
         name: targetName || "Student",
@@ -277,7 +398,7 @@ class TelegramBotManager {
         approvedBy: approvedByName,
       });
       if (targetUsername) {
-        this.approvedUsernames.add(targetUsername.replace(/^@/, '').toLowerCase());
+        this.approvedUsernames.add(targetUsername.replace(/^@/, '').toLowerCase().trim());
       }
 
       // Notify student in Telegram
@@ -299,6 +420,8 @@ Tap an option below or send your first medical question to begin!`;
       }
     }
 
+    this.syncAndPersistState();
+
     return {
       ok: true,
       message: `User ${targetUsername ? '@' + targetUsername : targetChatId} successfully approved!`,
@@ -308,15 +431,16 @@ Tap an option below or send your first medical question to begin!`;
 
   public async revokeUser(identifier: number | string): Promise<{ ok: boolean; message: string }> {
     const raw = String(identifier).trim();
+    const cleanUser = raw.replace(/^@/, '').toLowerCase().trim();
     let removed = false;
 
     for (const [cId, user] of this.approvedUsers.entries()) {
-      const matchChatId = String(cId) === raw;
-      const matchUsername = user.username && user.username.replace(/^@/, '').toLowerCase() === raw.replace(/^@/, '').toLowerCase();
+      const matchChatId = String(cId).trim() === raw || String(user.chatId).trim() === raw;
+      const matchUsername = user.username && user.username.replace(/^@/, '').toLowerCase().trim() === cleanUser;
       if (matchChatId || matchUsername) {
         this.approvedUsers.delete(cId);
         if (user.username) {
-          this.approvedUsernames.delete(user.username.replace(/^@/, '').toLowerCase());
+          this.approvedUsernames.delete(user.username.replace(/^@/, '').toLowerCase().trim());
         }
         removed = true;
         try {
@@ -326,12 +450,13 @@ Tap an option below or send your first medical question to begin!`;
       }
     }
 
-    if (!removed && (raw.startsWith("@") || isNaN(Number(raw)))) {
-      const cleanUser = raw.replace(/^@/, '').toLowerCase();
-      if (this.approvedUsernames.has(cleanUser)) {
-        this.approvedUsernames.delete(cleanUser);
-        removed = true;
-      }
+    if (this.approvedUsernames.has(cleanUser)) {
+      this.approvedUsernames.delete(cleanUser);
+      removed = true;
+    }
+
+    if (removed) {
+      this.syncAndPersistState();
     }
 
     return {
@@ -357,17 +482,53 @@ Tap an option below or send your first medical question to begin!`;
 
   public setAccessControlEnabled(enabled: boolean) {
     this.accessControlEnabled = enabled;
+    this.syncAndPersistState();
   }
 
   public addAdmin(identifier: number | string): boolean {
     const raw = String(identifier).trim();
     if (raw.startsWith("@") || isNaN(Number(raw))) {
-      this.adminUsernames.add(raw.replace(/^@/, '').toLowerCase());
-      return true;
+      const clean = raw.replace(/^@/, '').toLowerCase().trim();
+      this.adminUsernames.add(clean);
+      this.approvedUsernames.add(clean);
     } else {
-      this.adminChatIds.add(Number(raw));
-      return true;
+      const num = Number(raw);
+      this.adminChatIds.add(!isNaN(num) ? num : raw);
+      this.approvedUsers.set(raw, {
+        chatId: !isNaN(num) ? num : raw,
+        name: "Administrator",
+        approvedAt: new Date().toISOString(),
+        approvedBy: "Dashboard Admin",
+      });
     }
+    this.syncAndPersistState();
+    return true;
+  }
+
+  public removeAdmin(identifier: number | string): boolean {
+    const raw = String(identifier).trim();
+    let removed = false;
+    if (raw.startsWith("@") || isNaN(Number(raw))) {
+      const clean = raw.replace(/^@/, '').toLowerCase().trim();
+      if (this.adminUsernames.has(clean)) {
+        this.adminUsernames.delete(clean);
+        removed = true;
+      }
+    } else {
+      const num = Number(raw);
+      if (this.adminChatIds.has(num)) {
+        this.adminChatIds.delete(num);
+        removed = true;
+      }
+      if (this.adminChatIds.has(raw)) {
+        this.adminChatIds.delete(raw);
+        removed = true;
+      }
+    }
+    if (removed) {
+      this.syncAndPersistState();
+    }
+    return removed;
   }
 
   private getSystemPrompt(chatId: number | string): string {
@@ -976,7 +1137,7 @@ Tap an option below or send your first medical question to begin!`;
     }
   }
 
-  // Automated Gemini-Powered PDF Compiler & Exporter
+  // Automated PDF Compiler & Exporter (Compiles previous response directly without extra Gemini prompts)
   public async compileAndSendMedicalPdf(
     chatId: number | string,
     requestedTopic?: string,
@@ -993,118 +1154,72 @@ Tap an option below or send your first medical question to begin!`;
     // Normalize if the topic is just a generic phrase or command
     if (
       !cleanTopic ||
-      /^(pdf|convert to pdf|make pdf|download pdf|export pdf|notes|this|it|previous response|last response|last message|notes pdf|download)$/i.test(cleanTopic)
+      /^(pdf|convert to pdf|make pdf|download pdf|export pdf|notes|this|it|previous response|last response|last message|notes pdf|download|export)$/i.test(cleanTopic)
     ) {
       cleanTopic = "";
     }
 
-    // Determine the source content to compile
-    const sourceContent =
+    // Determine the source content to compile into PDF
+    let sourceContent =
       lastBotResp?.text ||
       lastModelTurn?.text ||
       fallbackText ||
       "";
 
-    // Immediate progress notification
-    try {
+    // If no previous response text exists, but user asked for a specific topic, generate the medical notes first
+    if (!sourceContent && cleanTopic && cleanTopic.length > 2) {
+      try {
+        await this.sendMessage(
+          chatId,
+          `⚙️ *Generating study notes on ${cleanTopic}...*\n_Preparing clinical content and compiling PDF..._`,
+          "Markdown"
+        );
+        const { text: generatedText } = await generateGeminiReply(
+          `Provide an exhaustive, high-yield clinical study guide on: "${cleanTopic}". Include core pathophysiology, diagnostic workup, first-line pharmacotherapy, and clinical pearls.`,
+          [],
+          this.getSystemPrompt(chatId),
+          0.3,
+          [],
+          this.config.model
+        );
+        sourceContent = generatedText;
+        this.lastBotResponseByChat.set(chatId, {
+          text: generatedText,
+          topic: cleanTopic,
+          sourceType: 'general',
+          timestamp: Date.now(),
+        });
+      } catch (err: any) {
+        console.error("[Telegram] Error generating medical content for PDF:", err);
+      }
+    }
+
+    if (!sourceContent || sourceContent.trim().length < 10) {
       await this.sendMessage(
         chatId,
-        `⚙️ *Compiling Medical Study Guide into PDF...*\n_Google Gemini is structuring, expanding, and formatting high-yield clinical notes with clinical pearls & diagnostic tables..._`,
+        "ℹ️ *No previous response found to convert to PDF.*\n\nAsk any clinical question, request MCQs, or generate notes first, then tap *📄 Export PDF Notes* or send `/pdf` to download your PDF instantly!",
         "Markdown"
       );
-    } catch {}
-
-    await this.sendChatAction(chatId, "upload_document");
-
-    let geminiPrompt = "";
-    if (cleanTopic && cleanTopic.length > 2) {
-      // User asked for a specific medical subject
-      geminiPrompt = `You are an elite Medical Sciences Professor, Board-Examiner, and Medical Textbook Author.
-Generate an exhaustive, publication-grade, board-examination medical study & clinical review guide on: "${cleanTopic}".
-
-Include:
-# ${cleanTopic.toUpperCase()} — COMPREHENSIVE CLINICAL STUDY GUIDE
-
-## 1. Executive Clinical Summary & Pathophysiology
-• Core pathophysiological mechanisms, cellular pathology, and anatomical relations.
-• Cardinal clinical signs and classic presenting triad/symptoms.
-
-## 2. Diagnostic Workup & Gold Standard Criteria
-• First-line screening vs. confirmatory gold-standard diagnostic modalities.
-• Key laboratory findings, radiological hallmarks, and histopathological features.
-
-## 3. High-Yield Pharmacotherapy & Clinical Management
-• First-line drug regimens with exact mechanisms of action, major contraindications, and lethal adverse effects.
-• Acute resuscitation and chronic maintenance protocols.
-
-## 4. High-Yield Board Pearls & Exam Traps
-💡 Clinical Pearl: [Critical board exam fact often tested on USMLE/NCLEX/NEET-PG]
-🎯 Exam Trap / Distractor: [Common clinical error or tricky distractor in MCQs]
-💊 High-Yield Rx: [Key drug of choice or receptor mechanism]
-
-Ensure all content is academically rigorous, thorough, beautifully organized with markdown headers (#, ##, ###), bullets (•), and clinical callouts. Output ONLY the markdown document text.`;
-    } else if (sourceContent && sourceContent.length > 20) {
-      // Intelligently compile and enrich the previous bot response & user conversation context
-      geminiPrompt = `You are an elite Medical Sciences Professor and Clinical Document Editor.
-Your task is to take the previous medical consultation/discussion text below and COMPILE & ENRICH it into an exhaustive, publication-grade, beautifully structured Medical Study & Clinical Reference Guide for PDF export.
-
-PREVIOUS MEDICAL DISCUSSION / RESPONSE TO COMPILE:
-"""
-${sourceContent}
-"""
-
-${lastUserTurn ? `Context / User Question: "${lastUserTurn.text}"` : ""}
-
-STRUCTURAL INSTRUCTIONS:
-1. Provide a professional top-level title: "# [TOPIC NAME] — CLINICAL STUDY NOTES & BOARD REVIEW"
-2. Organize logically into distinct sections with ## and ### headings:
-   - ## 1. Clinical Overview & Core Pathophysiology
-   - ## 2. Diagnostic Algorithm & Key Laboratory Findings
-   - ## 3. Pharmacotherapy, First-Line Regimens & Clinical Management
-   - ## 4. High-Yield Board Pearls & Diagnostic Traps
-3. Expand on any abbreviated points so the PDF document is a complete, self-contained, authoritative medical study guide.
-4. Highlight critical facts using callout prefixes:
-   • 💡 Clinical Pearl: [High-yield board exam takeaway]
-   • 🎯 Exam Trap / Distractor: [Common diagnostic mistake or MCQ trap]
-   • 💊 High-Yield Rx: [Drug of choice & mechanism]
-5. Format diagnostic comparisons, steps, or drug options with clear bullet points (•) or Markdown tables.
-6. Output ONLY the publication-ready medical study notes in clean markdown. Do NOT include casual conversational greetings like "Sure! Here is your PDF".`;
-    } else {
-      geminiPrompt = `You are an elite Medical Sciences Professor. Generate a comprehensive, high-yield Medical Sciences Board Review Guide covering essential USMLE Step 1/2 CK topics (Cardiology, Pharmacology, Renal, and Pathology).
-Include:
-# USMLE & CLINICAL SCIENCES HIGH-YIELD REVIEW GUIDE
-## 1. High-Yield Cardiology & Hemodynamics
-## 2. High-Yield Pharmacology & Receptor Pharmacology
-## 3. High-Yield Renal & Acid-Base Physiology
-## 4. High-Yield Pathology & Board Pearls
-💡 Clinical Pearl: [High-yield facts]
-Output ONLY formatted markdown notes.`;
+      return false;
     }
 
     try {
-      const { text: compiledNotes } = await generateGeminiReply(
-        geminiPrompt,
-        [],
-        this.getSystemPrompt(chatId),
-        0.3,
-        [],
-        this.config.model
-      );
+      // Determine clean metadata for the PDF document directly from the previous response
+      const docTopic = cleanTopic || lastBotResp?.topic || "Clinical Medicine & Board Review";
+      const docTitle = cleanTopic
+        ? `${cleanTopic.slice(0, 40)} — Clinical Notes`
+        : (lastBotResp?.topic && lastBotResp.topic.length > 3 ? lastBotResp.topic : "Medchat Clinical Study Notes");
 
-      // Extract title from markdown
-      const titleMatch = compiledNotes.match(/^#\s+(.+)$/m);
-      const rawTitle = titleMatch ? titleMatch[1].replace(/—.*$/, "").trim() : cleanTopic || lastBotResp?.topic || "Medchat Clinical Notes";
-      const docTitle = rawTitle.slice(0, 45);
-      const docTopic = cleanTopic || lastBotResp?.topic || "Medical Sciences Review";
-
-      const pdfBuffer = await generateMedicalPdf(compiledNotes, {
+      // Generate the PDF buffer directly from the previous response text (fast & 100% offline/in-memory)
+      const pdfBuffer = await generateMedicalPdf(sourceContent, {
         title: docTitle,
-        topic: `${docTopic} • Board Review & Clinical Education`,
-        author: "Medchat AI (Powered by Google Gemini)",
+        topic: `${docTopic} • Board Review`,
+        author: "Medchat Medical AI (Clinical Reference)",
+        userQuestion: lastUserTurn?.text,
       });
 
-      const safeFileName = `${(docTitle || "Medchat_Notes").replace(/[^a-zA-Z0-9]/g, "_").slice(0, 30)}.pdf`;
-      const caption = `🩺 *${docTitle}*\n📄 High-yield clinical study guide compiled automatically by Google Gemini from your medical review.`;
+      const safeFileName = `${docTitle.replace(/[^a-zA-Z0-9]/g, "_").slice(0, 32)}.pdf`;
+      const caption = `🩺 *${docTitle}*\n📄 _Compiled directly from your previous medical consultation._`;
 
       const sent = await this.sendDocument(
         chatId,
@@ -1122,9 +1237,9 @@ Output ONLY formatted markdown notes.`;
         id: `pdf-gen-${Date.now()}`,
         chatId,
         userName: "Student",
-        userMessage: requestedTopic ? `/pdf ${requestedTopic}` : "/pdf (Gemini compiled response)",
+        userMessage: requestedTopic ? `/pdf ${requestedTopic}` : "/pdf (Direct compiled response)",
         aiResponse: `[Generated PDF Document: ${safeFileName}]`,
-        latencyMs: 1500,
+        latencyMs: 80,
         timestamp: new Date().toISOString(),
         status: 'success',
         source: 'telegram',
@@ -1132,7 +1247,7 @@ Output ONLY formatted markdown notes.`;
 
       return true;
     } catch (err: any) {
-      console.error("[Telegram] PDF compilation error:", err);
+      console.error("[Telegram] Direct PDF compilation error:", err);
       await this.sendMessage(chatId, `⚠️ Could not compile PDF document: ${err.message || "Unknown error"}. Please try again.`);
       return false;
     }
@@ -1172,6 +1287,7 @@ Output ONLY formatted markdown notes.`;
   public getPersistentReplyKeyboard() {
     return {
       keyboard: [
+        [{ text: "📄 Export PDF Notes" }, { text: "📊 Interactive Quiz" }],
         [{ text: "🧹 Reset Memory" }, { text: "⚙️ Custom Prompt" }],
       ],
       resize_keyboard: true,
@@ -1184,7 +1300,7 @@ Output ONLY formatted markdown notes.`;
       inline_keyboard: [
         [
           { text: `🔄 Another ${subject.toUpperCase()} MCQ`, callback_data: `action_mcq_${subject.toLowerCase()}` },
-          { text: "💡 Medical Exam Tip", callback_data: "action_exam_tips" },
+          { text: "📄 Export PDF", callback_data: "action_export_pdf" },
         ],
         [
           { text: "💊 Pharmacology MCQ", callback_data: "action_mcq_pharm" },
@@ -1531,8 +1647,14 @@ CRITICAL CONSTRAINTS:
 
       // Auto-claim admin if no admin is set yet
       if (this.adminChatIds.size === 0 && this.adminUsernames.size === 0) {
-        this.adminChatIds.add(chatId);
-        if (fromUser.username) this.adminUsernames.add(fromUser.username.toLowerCase());
+        const numId = Number(chatId);
+        this.adminChatIds.add(!isNaN(numId) ? numId : chatId);
+        if (fromUser.username) {
+          const clean = fromUser.username.replace(/^@/, '').toLowerCase().trim();
+          this.adminUsernames.add(clean);
+          this.approvedUsernames.add(clean);
+        }
+        this.syncAndPersistState();
       }
 
       if (!this.isAdmin(chatId, fromUser.username)) {
@@ -1553,6 +1675,8 @@ CRITICAL CONSTRAINTS:
         return;
       }
       this.pendingRequests.delete(targetChatId);
+      this.pendingRequests.delete(String(targetChatId).trim());
+      this.syncAndPersistState();
       await this.answerCallbackQuery(queryId, `❌ Access request denied.`);
       await this.sendMessage(chatId, `❌ Request for ID \`${targetChatId}\` was dismissed.`, "Markdown");
       return;
@@ -1603,6 +1727,13 @@ CRITICAL CONSTRAINTS:
         const { text, latencyMs } = await this.generateClinicalMcq(cleanSubject);
         await this.sendMessage(chatId, text, "Markdown");
 
+        this.lastBotResponseByChat.set(chatId, {
+          text,
+          topic: `Clinical MCQ (${cleanSubject})`,
+          sourceType: 'mcq',
+          timestamp: Date.now(),
+        });
+
         this.logActivity({
           id: `cb-mcq-${Date.now()}`,
           chatId,
@@ -1618,6 +1749,13 @@ CRITICAL CONSTRAINTS:
         const topic = data === "action_mnemonics" ? "mnemonics" : data === "action_strategy" ? "strategy" : "general";
         const { text, latencyMs } = await this.generateExamTips(topic);
         await this.sendMessage(chatId, text, "Markdown");
+
+        this.lastBotResponseByChat.set(chatId, {
+          text,
+          topic: `Exam Tips & Mnemonics (${topic})`,
+          sourceType: 'exam_tips',
+          timestamp: Date.now(),
+        });
 
         this.logActivity({
           id: `cb-tip-${Date.now()}`,
@@ -2111,15 +2249,22 @@ Address the user's query with expert medical reasoning, quoting and synthesizing
       }
 
       if (secret === this.adminSecret || isFirstAdmin) {
-        this.adminChatIds.add(chatId);
-        if (sender.username) this.adminUsernames.add(sender.username.toLowerCase());
-        this.approvedUsers.set(chatId, {
+        const numId = Number(chatId);
+        this.adminChatIds.add(!isNaN(numId) ? numId : chatId);
+        if (sender.username) {
+          const cleanUser = sender.username.replace(/^@/, '').toLowerCase().trim();
+          this.adminUsernames.add(cleanUser);
+          this.approvedUsernames.add(cleanUser);
+        }
+        this.approvedUsers.set(String(chatId).trim(), {
           chatId,
           username: userHandle,
           name: userName,
           approvedAt: new Date().toISOString(),
           approvedBy: "Self (Admin Claim)",
         });
+
+        this.syncAndPersistState();
 
         const adminWelcome = `👑 *Admin Privileges Activated!*
 
@@ -2150,14 +2295,16 @@ _You will also receive instant interactive alerts whenever a new student request
 
     // If access control is enabled and user is NOT authorized:
     if (!isApprovedUser) {
-      const isNewReq = !this.pendingRequests.has(chatId);
-      this.pendingRequests.set(chatId, {
+      const isNewReq = !this.pendingRequests.has(String(chatId).trim()) && !this.pendingRequests.has(chatId);
+      this.pendingRequests.set(String(chatId).trim(), {
         chatId,
         username: userHandle,
         name: userName,
         requestedAt: new Date().toISOString(),
         lastMessage: text || (message.photo ? "[Photo]" : message.document ? "[Document]" : "[Action]"),
       });
+
+      this.syncAndPersistState();
 
       const accessNotice = `🔒 *Access Restricted: Private Medical Bot*
 
@@ -2308,6 +2455,7 @@ _If you are the bot owner, activate admin mode with:_ \`/claimadmin <passcode>\`
 
       if (text === "/toggleauth") {
         this.accessControlEnabled = !this.accessControlEnabled;
+        this.syncAndPersistState();
         await this.sendMessage(
           chatId,
           `🔒 *Access Control is now: ${this.accessControlEnabled ? 'ENABLED (Private - Approval Required)' : 'DISABLED (Public - Anyone can chat)'}*`,
@@ -2553,6 +2701,13 @@ Medchat is equipped with multimodal perception powered by Google Gemini!
         history.push({ role: "model", text: textSummary });
         this.chatHistories.set(chatId, history.slice(-12));
 
+        this.lastBotResponseByChat.set(chatId, {
+          text: textSummary,
+          topic: `Interactive Quiz (${topic})`,
+          sourceType: 'quiz',
+          timestamp: Date.now(),
+        });
+
         this.logActivity({
           id: `quiz-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
           chatId,
@@ -2669,6 +2824,7 @@ Medchat is equipped with multimodal perception powered by Google Gemini!
         const newPrompt = text.replace("/setprompt", "").trim();
         this.customSystemPrompts.set(chatId, newPrompt);
         this.userStates.delete(chatId);
+        this.syncAndPersistState();
         await this.sendMessage(chatId, `✅ *Custom prompt updated!*\n\nYour new prompt:\n_${newPrompt}_\n\nTo revert, send /resetprompt`, "Markdown");
       } else {
         this.userStates.set(chatId, 'WAITING_FOR_PROMPT');
@@ -2680,6 +2836,7 @@ Medchat is equipped with multimodal perception powered by Google Gemini!
     if (text === "/resetprompt") {
       this.customSystemPrompts.delete(chatId);
       this.userStates.delete(chatId);
+      this.syncAndPersistState();
       await this.sendMessage(chatId, "✅ *Prompt Reset*\n\nYour bot has returned to its normal (default) medical mode.", "Markdown");
       return;
     }
@@ -2687,6 +2844,7 @@ Medchat is equipped with multimodal perception powered by Google Gemini!
     if (this.userStates.get(chatId) === 'WAITING_FOR_PROMPT') {
       this.customSystemPrompts.set(chatId, text);
       this.userStates.delete(chatId);
+      this.syncAndPersistState();
       await this.sendMessage(chatId, `✅ *Custom prompt updated!*\n\nYour new prompt:\n_${text}_\n\nTo revert, send /resetprompt`, "Markdown");
       return;
     }
@@ -3035,6 +3193,7 @@ CRITICAL INSTRUCTION: DO NOT generate or attach any multiple-choice questions (M
 
   public updateConfig(newConfig: Partial<typeof this.config>): void {
     this.config = { ...this.config, ...newConfig };
+    this.syncAndPersistState();
     if (newConfig.pollingEnabled !== undefined) {
       if (newConfig.pollingEnabled && !this.isPollingActive) {
         this.startPolling();
