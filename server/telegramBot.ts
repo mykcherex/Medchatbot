@@ -450,20 +450,62 @@ Do not use markdown blocks around the JSON.`;
       if (!parsedQuizzes || parsedQuizzes.length === 0) return false;
 
       const q = parsedQuizzes[0];
-      const pollQuestionText = `${q.scenario ? q.scenario + "\n\n" : ""}${q.question}`.slice(0, 300); // Telegram limit
+      const fullText = `*Daily Clinical Vignette: ${topicToPost}*\n\n${q.scenario ? q.scenario + "\n\n" : ""}${q.question}`;
 
-      // Send the poll to the channel
-      await this.sendPoll(
-        channelId,
-        pollQuestionText,
-        q.options,
-        q.correctOptionId,
-        q.explanation
-      );
+      // 1. Send the scenario text
+      const msgRes = await fetch(`${this.getApiBase()}/sendMessage`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          chat_id: channelId,
+          text: fullText,
+          parse_mode: "Markdown"
+        })
+      });
+      const msgData = await msgRes.json();
+      if (!msgData.ok) {
+        console.error("[Cron] Failed to send vignette text to channel:", msgData);
+        return false;
+      }
+      const messageId = msgData.result.message_id;
 
-      // We can also post the full rationale as a spoiler-tagged message replying to the poll, but sendPoll doesn't easily return the message_id unless we parse it.
-      // Wait, sendPoll returns a boolean. If we change it to return the message, we could reply. 
-      // For now, the poll explanation is visible when they answer.
+      // 2. Send the poll as a reply to the text
+      const pollRes = await fetch(`${this.getApiBase()}/sendPoll`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          chat_id: channelId,
+          question: q.question.slice(0, 300),
+          options: JSON.stringify(q.options.slice(0, 10).map((opt) => String(opt).slice(0, 100))),
+          type: "quiz",
+          correct_option_id: q.correctOptionId,
+          is_anonymous: true,
+          explanation: (q.explanation || "").slice(0, 200),
+          reply_to_message_id: messageId
+        })
+      });
+      const pollData = await pollRes.json();
+      if (!pollData.ok) {
+        console.error("[Cron] Failed to send poll to channel:", pollData);
+        return false;
+      }
+      const pollMsgId = pollData.result.message_id;
+
+      // 3. Send full rationale as a spoiler-tagged HTML reply
+      if (q.fullRationale) {
+        const safeRationale = q.fullRationale.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+        await fetch(`${this.getApiBase()}/sendMessage`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            chat_id: channelId,
+            text: `<b>Rationale:</b>\n<tg-spoiler>${safeRationale}</tg-spoiler>`,
+            parse_mode: "HTML",
+            reply_to_message_id: pollMsgId
+          })
+        });
+      }
+
       console.log(`[Cron] Successfully posted vignette on "${topicToPost}" to ${channelId}`);
       return true;
     } catch (err) {
