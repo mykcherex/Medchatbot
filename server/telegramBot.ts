@@ -1465,7 +1465,9 @@ Tap an option below or send your first medical question to begin!`;
     
     // If the question alone exceeds Telegram's limit (300) OR there is a scenario, we split it up.
     if (rawQuestion.length > 290 || hasScenario) {
-      const fullText = `📋 *Clinical Vignette:*\n\n${hasScenario ? quiz.scenario + "\n\n" : ""}${rawQuestion}`;
+      // Clean up the header to include the prefix (e.g. Q1/50)
+      const headerPrefix = prefixStem ? ` ${prefixStem.replace(/[\[\]]/g, '')}` : "";
+      const fullText = `📋 *Clinical Vignette${headerPrefix}:*\n\n${hasScenario ? quiz.scenario + "\n\n" : ""}${quiz.question}`;
       
       const msgRes = await fetch(`${this.getApiBase()}/sendMessage`, {
         method: "POST",
@@ -2512,15 +2514,6 @@ ${sanitizeTelegramMarkdown(c.distractorAnalysis)}
 
       for (let i = 0; i < quizzes.length; i++) {
         const quiz = quizzes[i];
-
-        // Send patient vignette as clinical scenario if present
-        if (allowScenario && quiz.scenario && quiz.scenario.trim().length > 0) {
-          await this.sendMessage(
-            chatId,
-            `📋 *Clinical Case Vignette${quizzes.length > 1 ? ` (${i + 1}/${quizzes.length})` : ""}:*\n\n${quiz.scenario}`,
-            "Markdown"
-          );
-        }
 
         // Format question stem (prefix with index if multiple quizzes)
         const prefix = quizzes.length > 1
