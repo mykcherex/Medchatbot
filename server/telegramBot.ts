@@ -323,6 +323,8 @@ class TelegramBotManager {
     lastActiveAt: undefined as string | undefined,
   };
 
+  private isChannelRestoreComplete: boolean = false;
+
   constructor() {
     this.token = process.env.TELEGRAM_BOT_TOKEN || "8862664585:AAFVFulDGYrS_pPdfcFH-peILkbHZVi-84A";
 
@@ -391,19 +393,27 @@ class TelegramBotManager {
       });
     }
 
-    this.syncAndPersistState();
+    // Save initial disk state without triggering unhydrated channel backup
+    BotPersistenceService.getInstance().saveStateSync();
 
-    // 3. Initiate immediate Channel storage admin sync from @theoutliness
-    // First restore any authorized users from the pinned backup in case disk was wiped
-    this.restoreStateFromChannelBackup().then(() => {
-      return this.syncAdminsFromChannel();
-    }).catch(err => {
-      console.warn("[TelegramBot] Initial channel sync warning:", err);
-    });
+    // 3. Initiate immediate Channel storage restore BEFORE admin sync
+    // This guarantees that all approved users from the pinned backup are hydrated before any admin sync runs.
+    this.restoreStateFromChannelBackup()
+      .then(async () => {
+        this.isChannelRestoreComplete = true;
+        await this.syncAdminsFromChannel();
+        this.syncAndPersistState(true);
+      })
+      .catch(err => {
+        console.warn("[TelegramBot] Initial channel restore warning:", err);
+        this.isChannelRestoreComplete = true;
+        this.syncAdminsFromChannel().catch(() => {});
+      });
 
     // 4. Set up recurring 60s background sync to ensure admins and whitelists are never forgotten
     setInterval(() => {
       this.syncAdminsFromChannel().catch(() => {});
+      this.restoreStateFromChannelBackup().catch(() => {});
     }, 60000);
 
     // 5. Initialize Daily Cron Jobs
@@ -565,6 +575,28 @@ Do not use markdown blocks around the JSON.`;
           }
         }
 
+        // Restore approvedUsernames
+        if (backupState.approvedUsernames) {
+          for (const u of backupState.approvedUsernames) {
+            const clean = u.replace(/^@/, '').toLowerCase().trim();
+            if (!this.approvedUsernames.has(clean)) {
+              this.approvedUsernames.add(clean);
+              changed = true;
+            }
+          }
+        }
+
+        // Restore pendingRequests
+        if (backupState.pendingRequests) {
+          for (const req of backupState.pendingRequests) {
+            const key = String(req.chatId).trim();
+            if (!this.pendingRequests.has(key)) {
+              this.pendingRequests.set(key, req);
+              changed = true;
+            }
+          }
+        }
+
         if (backupState.customSystemPrompts) {
           for (const [cId, prompt] of Object.entries(backupState.customSystemPrompts)) {
             if (!this.customSystemPrompts.has(cId)) {
@@ -574,18 +606,20 @@ Do not use markdown blocks around the JSON.`;
           }
         }
 
-        if (backupState.autoPostTopics) {
+        if (backupState.autoPostTopics && backupState.autoPostTopics.length > 0) {
           this.autoPostTopics = backupState.autoPostTopics;
           changed = true;
         }
 
         if (changed) {
-          console.log("[TelegramBot] Restored state from channel backup.");
+          console.log(`[TelegramBot] Successfully merged state from channel backup (${this.approvedUsers.size} users, ${this.approvedUsernames.size} usernames, ${this.adminChatIds.size} admins).`);
           this.syncAndPersistState();
         }
       }
     } catch (err) {
       console.warn("[TelegramBot] Error restoring state from channel backup:", err);
+    } finally {
+      this.isChannelRestoreComplete = true;
     }
   }
 
@@ -633,7 +667,7 @@ Do not use markdown blocks around the JSON.`;
     }
   }
 
-  public syncAndPersistState(): void {
+  public syncAndPersistState(forceChannelBackup: boolean = false): void {
     try {
       const persistence = BotPersistenceService.getInstance();
       const state = persistence.getState();
@@ -656,9 +690,13 @@ Do not use markdown blocks around the JSON.`;
       persistence.saveStateSync();
 
       // 2. Asynchronously backup to permanent cloud channel storage (@theoutliness)
-      ChannelStorageService.getInstance().backupStateToChannel(this.token, state).catch(err => {
-        console.warn("[TelegramBot] Channel backup error:", err);
-      });
+      // Guard: Only post backup to channel if restore is complete, or if forceChannelBackup is true,
+      // or if we have users, to prevent an unhydrated container from overwriting channel storage.
+      if (this.isChannelRestoreComplete || forceChannelBackup || this.approvedUsers.size > 1) {
+        ChannelStorageService.getInstance().backupStateToChannel(this.token, state).catch(err => {
+          console.warn("[TelegramBot] Channel backup error:", err);
+        });
+      }
     } catch (err) {
       console.error("[Telegram] Failed to synchronize persistent state:", err);
     }
@@ -748,6 +786,14 @@ Do not use markdown blocks around the JSON.`;
       if (raw.startsWith("@") || isNaN(Number(raw))) {
         targetUsername = raw.replace(/^@/, '').toLowerCase().trim();
         this.approvedUsernames.add(targetUsername);
+        // Also register in approvedUsers map so they appear in student lists, stats, and cloud backups
+        this.approvedUsers.set(`@${targetUsername}`, {
+          chatId: `@${targetUsername}`,
+          username: `@${targetUsername}`,
+          name: targetName || `@${targetUsername}`,
+          approvedAt: new Date().toISOString(),
+          approvedBy: approvedByName,
+        });
       } else {
         targetChatId = Number(raw);
       }
@@ -785,7 +831,7 @@ Tap an option below or send your first medical question to begin!`;
       }
     }
 
-    this.syncAndPersistState();
+    this.syncAndPersistState(true);
 
     return {
       ok: true,
@@ -3508,9 +3554,10 @@ _You will also receive instant interactive alerts whenever a new student request
       }
     }
 
-    // Check authorization status
-    const isAdminUser = this.isAdmin(chatId, sender.username);
-    const isApprovedUser = this.isAuthorized(chatId, sender.username);
+    // Check authorization status across both chatId and sender.id (handles DMs, groups, channels)
+    const senderId = sender.id;
+    const isAdminUser = this.isAdmin(chatId, sender.username) || (senderId ? this.isAdmin(senderId, sender.username) : false);
+    const isApprovedUser = this.isAuthorized(chatId, sender.username) || (senderId ? this.isAuthorized(senderId, sender.username) : false);
 
     // Auto-lock and permanently store active admin or approved user IDs to prevent state loss
     if (isAdminUser || isApprovedUser) {
@@ -3528,6 +3575,29 @@ _You will also receive instant interactive alerts whenever a new student request
         stateChanged = true;
       }
 
+      // Also register senderId if distinct from chatId (e.g. In groups or supergroups)
+      if (senderId && String(senderId).trim() !== key) {
+        const sKey = String(senderId).trim();
+        if (!this.approvedUsers.has(sKey)) {
+          this.approvedUsers.set(sKey, {
+            chatId: senderId,
+            username: userHandle,
+            name: userName,
+            approvedAt: new Date().toISOString(),
+            approvedBy: isAdminUser ? "Administrator (Self/Channel)" : "Whitelisted Member",
+          });
+          stateChanged = true;
+        }
+      }
+
+      if (sender.username) {
+        const cleanU = sender.username.replace(/^@/, '').toLowerCase().trim();
+        if (!this.approvedUsernames.has(cleanU)) {
+          this.approvedUsernames.add(cleanU);
+          stateChanged = true;
+        }
+      }
+
       if (isAdminUser) {
         const numId = Number(chatId);
         const validAdminId = !isNaN(numId) ? numId : chatId;
@@ -3535,11 +3605,18 @@ _You will also receive instant interactive alerts whenever a new student request
           this.adminChatIds.add(validAdminId);
           stateChanged = true;
         }
+        if (senderId) {
+          const numSenderId = Number(senderId);
+          const validSenderId = !isNaN(numSenderId) ? numSenderId : senderId;
+          if (!this.adminChatIds.has(validSenderId)) {
+            this.adminChatIds.add(validSenderId);
+            stateChanged = true;
+          }
+        }
         if (sender.username) {
           const cleanU = sender.username.replace(/^@/, '').toLowerCase().trim();
           if (!this.adminUsernames.has(cleanU)) {
             this.adminUsernames.add(cleanU);
-            this.approvedUsernames.add(cleanU);
             stateChanged = true;
           }
         }
