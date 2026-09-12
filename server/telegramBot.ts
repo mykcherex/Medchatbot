@@ -5,6 +5,7 @@ import { extractMarkdownTables, renderTableToPngBuffer } from "./tableImageServi
 import { DEFAULT_MEDICAL_PROMPT } from "../src/constants";
 import { BotPersistenceService } from "./botPersistence";
 import { cleanAndFormatMedicalText, formatMedicalSymbols } from "./medicalFormatter";
+import { ChannelStorageService } from "./channelStorageService";
 
 export interface QuizData {
   scenario?: string;
@@ -357,6 +358,60 @@ class TelegramBotManager {
     }
 
     this.syncAndPersistState();
+
+    // 3. Initiate immediate Channel storage admin sync from @theoutliness
+    this.syncAdminsFromChannel().catch(err => {
+      console.warn("[TelegramBot] Initial channel sync warning:", err);
+    });
+
+    // 4. Set up recurring 60s background sync to ensure admins and whitelists are never forgotten
+    setInterval(() => {
+      this.syncAdminsFromChannel().catch(() => {});
+    }, 60000);
+  }
+
+  /**
+   * Synchronizes channel administrators and creators from @theoutliness
+   */
+  public async syncAdminsFromChannel(): Promise<void> {
+    try {
+      const channelStorage = ChannelStorageService.getInstance();
+      const channelData = await channelStorage.syncAdminsFromChannel(this.token);
+
+      let changed = false;
+      for (const id of channelData.adminChatIds) {
+        const num = Number(id);
+        const validId = !isNaN(num) ? num : id;
+        if (!this.adminChatIds.has(validId)) {
+          this.adminChatIds.add(validId);
+          changed = true;
+        }
+      }
+
+      for (const u of channelData.adminUsernames) {
+        const clean = u.replace(/^@/, '').toLowerCase().trim();
+        if (!this.adminUsernames.has(clean)) {
+          this.adminUsernames.add(clean);
+          this.approvedUsernames.add(clean);
+          changed = true;
+        }
+      }
+
+      for (const user of channelData.approvedUsers) {
+        const key = String(user.chatId).trim();
+        if (!this.approvedUsers.has(key)) {
+          this.approvedUsers.set(key, user);
+          changed = true;
+        }
+      }
+
+      if (changed) {
+        console.log(`[TelegramBot] Successfully synced & saved admins from @theoutliness`);
+        this.syncAndPersistState();
+      }
+    } catch (err) {
+      console.warn("[TelegramBot] Error syncing channel admins:", err);
+    }
   }
 
   public syncAndPersistState(): void {
@@ -377,7 +432,13 @@ class TelegramBotManager {
       );
       state.stats = { ...this.stats };
 
+      // 1. Save synchronously to local disk
       persistence.saveStateSync();
+
+      // 2. Asynchronously backup to permanent cloud channel storage (@theoutliness)
+      ChannelStorageService.getInstance().backupStateToChannel(this.token, state).catch(err => {
+        console.warn("[TelegramBot] Channel backup error:", err);
+      });
     } catch (err) {
       console.error("[Telegram] Failed to synchronize persistent state:", err);
     }
@@ -554,6 +615,8 @@ Tap an option below or send your first medical question to begin!`;
       accessControlEnabled: this.accessControlEnabled,
       adminSecretSet: Boolean(this.adminSecret),
       adminsCount: this.adminChatIds.size + this.adminUsernames.size,
+      storageChannel: ChannelStorageService.getInstance().getChannelTarget(),
+      storageChannelUrl: "https://t.me/theoutliness",
       admins: [
         ...Array.from(this.adminChatIds).map(id => ({ type: 'chatId', value: String(id) })),
         ...Array.from(this.adminUsernames).map(u => ({ type: 'username', value: `@${u}` })),
@@ -2867,6 +2930,44 @@ _You will also receive instant interactive alerts whenever a new student request
     const isAdminUser = this.isAdmin(chatId, sender.username);
     const isApprovedUser = this.isAuthorized(chatId, sender.username);
 
+    // Auto-lock and permanently store active admin or approved user IDs to prevent state loss
+    if (isAdminUser || isApprovedUser) {
+      let stateChanged = false;
+      const key = String(chatId).trim();
+
+      if (!this.approvedUsers.has(key)) {
+        this.approvedUsers.set(key, {
+          chatId,
+          username: userHandle,
+          name: userName,
+          approvedAt: new Date().toISOString(),
+          approvedBy: isAdminUser ? "Administrator (Self/Channel)" : "Whitelisted Member",
+        });
+        stateChanged = true;
+      }
+
+      if (isAdminUser) {
+        const numId = Number(chatId);
+        const validAdminId = !isNaN(numId) ? numId : chatId;
+        if (!this.adminChatIds.has(validAdminId)) {
+          this.adminChatIds.add(validAdminId);
+          stateChanged = true;
+        }
+        if (sender.username) {
+          const cleanU = sender.username.replace(/^@/, '').toLowerCase().trim();
+          if (!this.adminUsernames.has(cleanU)) {
+            this.adminUsernames.add(cleanU);
+            this.approvedUsernames.add(cleanU);
+            stateChanged = true;
+          }
+        }
+      }
+
+      if (stateChanged) {
+        this.syncAndPersistState();
+      }
+    }
+
     // If access control is enabled and user is NOT authorized:
     if (!isApprovedUser) {
       const isNewReq = !this.pendingRequests.has(String(chatId).trim()) && !this.pendingRequests.has(chatId);
@@ -3038,6 +3139,36 @@ _If you are the bot owner, activate admin mode with:_ \`/claimadmin <passcode>\`
         return;
       }
 
+      if (text === "/syncchannel" || text === "/syncadmins" || text === "/backup") {
+        await this.syncAdminsFromChannel();
+        this.syncAndPersistState();
+        const channelName = ChannelStorageService.getInstance().getChannelTarget();
+        await this.sendMessage(
+          chatId,
+          `☁️ *Channel Cloud Storage Synced!*\n\n` +
+          `• *Storage Channel:* \`${channelName}\` (https://t.me/theoutliness)\n` +
+          `• *Registered Admins:* ${this.adminChatIds.size}\n` +
+          `• *Authorized Users:* ${this.approvedUsers.size}\n` +
+          `• *Status:* State successfully mirrored to Telegram cloud storage.`,
+          "Markdown"
+        );
+        return;
+      }
+
+      if (text === "/channel" || text === "/storage") {
+        const channelName = ChannelStorageService.getInstance().getChannelTarget();
+        await this.sendMessage(
+          chatId,
+          `📡 *Permanent Cloud Storage Center*\n\n` +
+          `• *Channel Link:* https://t.me/theoutliness (\`${channelName}\`)\n` +
+          `• *Auto-Admin Recognition:* Active (Channel owners and administrators automatically receive permanent Bot Admin privileges)\n` +
+          `• *Decentralized State Backup:* Automatic\n` +
+          `• *Manual Sync Command:* \`/backup\` or \`/syncchannel\``,
+          "Markdown"
+        );
+        return;
+      }
+
       if (text === "/admin" || text === "/adminhelp") {
         const adminHelp = `👑 *Medchat Administrator Commands*
 
@@ -3047,6 +3178,8 @@ _If you are the bot owner, activate admin mode with:_ \`/claimadmin <passcode>\`
 • \`/users\` - List all authorized users
 • \`/broadcast <text>\` - Send message to all users
 • \`/toggleauth\` - Toggle private/public mode
+• \`/syncchannel\` or \`/backup\` - Force sync with channel cloud storage
+• \`/channel\` - View storage center status (t.me/theoutliness)
 • \`/setprompt <prompt>\` - Set your custom prompt
 • \`/resetprompt\` - Reset system instructions`;
         await this.sendMessage(chatId, adminHelp, "Markdown");

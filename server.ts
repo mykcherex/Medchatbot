@@ -221,6 +221,16 @@ async function startServer() {
     res.json({ ok, status: telegramBot.getAccessControlStatus() });
   });
 
+  app.post("/api/access-control/sync-channel", async (req, res) => {
+    try {
+      await telegramBot.syncAdminsFromChannel();
+      telegramBot.syncAndPersistState();
+      res.json({ ok: true, status: telegramBot.getAccessControlStatus() });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message || "Failed to sync channel storage" });
+    }
+  });
+
   // Telegram incoming Webhook endpoint
   app.post("/api/telegram/webhook", async (req, res) => {
     // Acknowledge update immediately to Telegram (HTTP 200)

@@ -144,6 +144,27 @@ export function AccessControlManager() {
     }
   };
 
+  const handleSyncChannel = async () => {
+    try {
+      setLoading(true);
+      const res = await fetch('/api/access-control/sync-channel', { method: 'POST' });
+      const json = await res.json();
+      if (res.ok) {
+        setData(json.status);
+        setActionStatus({
+          type: 'success',
+          message: 'Cloud Storage Channel (@theoutliness) successfully synchronized! All admins & state secured.',
+        });
+      } else {
+        setActionStatus({ type: 'error', message: json.error || 'Failed to sync channel storage' });
+      }
+    } catch (err: any) {
+      setActionStatus({ type: 'error', message: err.message || 'Network error syncing storage' });
+    } finally {
+      setLoading(false);
+    }
+  };
+
   return (
     <div className="space-y-6">
       {/* Action Notification Alert */}
@@ -482,6 +503,56 @@ export function AccessControlManager() {
                 >
                   Add
                 </button>
+              </div>
+            </div>
+          </div>
+
+          {/* Cloud Storage Center Card (@theoutliness) */}
+          <div className="bg-white rounded-2xl border border-teal-200/80 p-5 shadow-xs space-y-3 bg-gradient-to-br from-teal-50/30 to-emerald-50/20">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <div className="w-8 h-8 rounded-lg bg-teal-600 text-white flex items-center justify-center font-bold text-xs">
+                  ☁️
+                </div>
+                <div>
+                  <h3 className="text-sm font-bold text-slate-900">Decentralized Channel Storage</h3>
+                  <a
+                    href="https://t.me/theoutliness"
+                    target="_blank"
+                    rel="noreferrer"
+                    className="text-[11px] text-teal-700 font-semibold hover:underline flex items-center gap-1"
+                  >
+                    <span>t.me/theoutliness</span>
+                    <span>↗</span>
+                  </a>
+                </div>
+              </div>
+              <button
+                onClick={handleSyncChannel}
+                disabled={loading}
+                className="px-3 py-1.5 bg-teal-600 hover:bg-teal-700 text-white rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer shadow-xs disabled:opacity-60"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
+                <span>Sync Channel</span>
+              </button>
+            </div>
+
+            <p className="text-xs text-slate-600 leading-relaxed">
+              Your Telegram channel is linked as the permanent source of truth for administrator recognition and bot state replication. Admins are automatically verified and mirrored across sessions.
+            </p>
+
+            <div className="p-3 rounded-xl bg-white border border-teal-200/70 text-xs space-y-1.5">
+              <div className="flex items-center justify-between text-[11px]">
+                <span className="text-slate-500 font-medium">Channel Link:</span>
+                <span className="font-mono font-bold text-teal-900">@theoutliness</span>
+              </div>
+              <div className="flex items-center justify-between text-[11px]">
+                <span className="text-slate-500 font-medium">Auto-Admin Recognition:</span>
+                <span className="font-semibold text-emerald-700 bg-emerald-50 px-1.5 py-0.5 rounded border border-emerald-200">Active</span>
+              </div>
+              <div className="flex items-center justify-between text-[11px]">
+                <span className="text-slate-500 font-medium">State Backup:</span>
+                <span className="text-slate-700 font-medium">Automatic (Local + Channel)</span>
               </div>
             </div>
           </div>

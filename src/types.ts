@@ -120,6 +120,8 @@ export interface AccessControlStatus {
   accessControlEnabled: boolean;
   adminSecretSet: boolean;
   adminsCount: number;
+  storageChannel?: string;
+  storageChannelUrl?: string;
   admins: { type: 'chatId' | 'username'; value: string }[];
   approvedUsers: AuthorizedUser[];
   approvedUsernames: string[];
