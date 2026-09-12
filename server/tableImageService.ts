@@ -1,4 +1,5 @@
 import { Resvg } from '@resvg/resvg-js';
+import { formatMedicalSymbols } from './medicalFormatter';
 
 export interface ParsedTable {
   title?: string;
@@ -16,10 +17,11 @@ export interface SplitMessagePart {
 }
 
 /**
- * Strips basic markdown markers for clean SVG text rendering
+ * Strips basic markdown markers and formats medical symbols/LaTeX for clean SVG text rendering
  */
 function cleanText(text: string): string {
-  return text
+  const formatted = formatMedicalSymbols(text);
+  return formatted
     .replace(/\*\*(.*?)\*\*/g, '$1')
     .replace(/\*(.*?)\*/g, '$1')
     .replace(/__(.*?)__/g, '$1')

@@ -1,4 +1,5 @@
 import PDFDocument from 'pdfkit';
+import { formatMedicalSymbols } from './medicalFormatter';
 
 export interface GeneratePdfOptions {
   title?: string;
@@ -11,7 +12,8 @@ export interface GeneratePdfOptions {
  * Replaces or standardizes markdown markers & emojis for clean PDFKit font rendering
  */
 function cleanMarkdownText(text: string): string {
-  return text
+  const formatted = formatMedicalSymbols(text);
+  return formatted
     // Normalize emoji badges to clean, professional ASCII tags
     .replace(/💡\s*(?:Clinical Pearl|Pearl)?/gi, '[CLINICAL PEARL] ')
     .replace(/🎯\s*(?:Exam Trap|Distractor|Trap)?/gi, '[EXAM TRAP] ')

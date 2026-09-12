@@ -4,6 +4,7 @@ import { generateMedicalPdf } from "./pdfService";
 import { extractMarkdownTables, renderTableToPngBuffer } from "./tableImageService";
 import { DEFAULT_MEDICAL_PROMPT } from "../src/constants";
 import { BotPersistenceService } from "./botPersistence";
+import { cleanAndFormatMedicalText, formatMedicalSymbols } from "./medicalFormatter";
 
 export interface QuizData {
   scenario?: string;
@@ -208,9 +209,11 @@ export { DEFAULT_MEDICAL_PROMPT };
 
 function sanitizeTelegramMarkdown(text: string): string {
   if (!text) return "";
-  // In Telegram legacy Markdown, underscores between alphanumeric characters
+  // 1. Process LaTeX, math symbols, superscripts, subscripts, bolding, and spacing
+  const formatted = cleanAndFormatMedicalText(text);
+  // 2. In Telegram legacy Markdown, underscores between alphanumeric characters
   // (e.g. CYP3A4_substrate, H+_ATPase, Na_K_pump) cause syntax parse errors unless escaped.
-  return text.replace(/([a-zA-Z0-9])_([a-zA-Z0-9])/g, "$1\\_$2");
+  return formatted.replace(/([a-zA-Z0-9])_([a-zA-Z0-9])/g, "$1\\_$2");
 }
 
 class TelegramBotManager {
@@ -1011,12 +1014,15 @@ Tap an option below or send your first medical question to begin!`;
   ): Promise<boolean> {
     if (!fullText) return false;
 
+    // Apply medical symbol & spacing formatting
+    const formattedText = cleanAndFormatMedicalText(fullText);
+
     // Check for tables in the response
-    const { tables, parts } = extractMarkdownTables(fullText);
+    const { tables, parts } = extractMarkdownTables(formattedText);
 
     // If no markdown tables found, send as standard message
     if (tables.length === 0 || parts.length === 0) {
-      return this.sendMessage(chatId, fullText, parseMode, replyMarkup);
+      return this.sendMessage(chatId, formattedText, parseMode, replyMarkup);
     }
 
     // Process parts sequentially: text -> visual table image -> text -> etc.
