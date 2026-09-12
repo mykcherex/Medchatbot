@@ -15,7 +15,9 @@ import {
   Send,
   Loader2,
   FileQuestion,
-  Lightbulb
+  Lightbulb,
+  Timer,
+  Zap
 } from 'lucide-react';
 import { DEFAULT_MEDICAL_PROMPT } from '../constants';
 
@@ -121,6 +123,9 @@ export function BotSettings({
   const [activeSubjects, setActiveSubjects] = useState<string[]>(
     config.activeSubjects || ['Anatomy', 'Physiology', 'Biochemistry', 'Microbiology', 'Pathology', 'Pharmacology']
   );
+  const [rapidFireCountdownSeconds, setRapidFireCountdownSeconds] = useState<number>(
+    config.rapidFireCountdownSeconds ?? 30
+  );
   const [saving, setSaving] = useState(false);
   const [savedSuccess, setSavedSuccess] = useState(false);
 
@@ -148,6 +153,7 @@ export function BotSettings({
         temperature,
         examLevel,
         activeSubjects,
+        rapidFireCountdownSeconds,
       });
       setSavedSuccess(true);
       setTimeout(() => setSavedSuccess(false), 2500);
@@ -380,6 +386,82 @@ export function BotSettings({
             onChange={(e) => setTemperature(parseFloat(e.target.value))}
             className="w-full h-1.5 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-indigo-600"
           />
+        </div>
+
+        {/* Timed High-Yield Rapid Fire Exam Countdown Settings */}
+        <div className="p-4 rounded-xl bg-gradient-to-r from-amber-500/10 via-amber-500/5 to-transparent border border-amber-200/80 space-y-3">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <div className="w-8 h-8 rounded-lg bg-amber-500/20 text-amber-700 flex items-center justify-center">
+                <Zap className="w-4 h-4" />
+              </div>
+              <div>
+                <h4 className="text-xs font-bold text-slate-900 flex items-center gap-1.5">
+                  <span>Timed Rapid Fire Exam Simulator</span>
+                  <span className="px-1.5 py-0.5 rounded bg-amber-100 text-amber-800 text-[10px] font-bold">
+                    Telegram Native Timer
+                  </span>
+                </h4>
+                <p className="text-[11px] text-slate-600">
+                  Controls the native Telegram countdown timer (<code className="font-mono text-amber-800">open_period</code>) for <code className="font-mono text-amber-800">/rapidfire</code> single-best-answer MCQs
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2">
+              <span className="text-xs font-mono font-bold text-amber-900 bg-amber-100/80 px-2.5 py-1 rounded-md border border-amber-300">
+                ⏱️ {rapidFireCountdownSeconds}s per question
+              </span>
+            </div>
+          </div>
+
+          <div className="space-y-2">
+            <div className="flex items-center justify-between text-xs text-slate-700">
+              <span className="font-medium">Countdown Duration Slider:</span>
+              <span className="text-[11px] text-slate-500">Allowed range: 5s – 600s</span>
+            </div>
+            <input
+              id="rapid-fire-timer-slider"
+              type="range"
+              min="5"
+              max="180"
+              step="5"
+              value={rapidFireCountdownSeconds}
+              onChange={(e) => setRapidFireCountdownSeconds(parseInt(e.target.value, 10))}
+              className="w-full h-1.5 bg-amber-200 rounded-lg appearance-none cursor-pointer accent-amber-600"
+            />
+          </div>
+
+          {/* Quick presets */}
+          <div className="flex flex-wrap items-center gap-1.5 pt-1">
+            <span className="text-[11px] font-semibold text-slate-600 mr-1">Quick Presets:</span>
+            {[
+              { sec: 10, label: '10s Blitz' },
+              { sec: 15, label: '15s Sprint' },
+              { sec: 20, label: '20s Fast' },
+              { sec: 30, label: '30s Board Pace' },
+              { sec: 45, label: '45s Moderate' },
+              { sec: 60, label: '60s Reasoning' },
+              { sec: 90, label: '90s Extended' },
+            ].map((p) => (
+              <button
+                key={p.sec}
+                type="button"
+                onClick={() => setRapidFireCountdownSeconds(p.sec)}
+                className={`px-2.5 py-1 rounded text-[11px] font-semibold transition-all cursor-pointer ${
+                  rapidFireCountdownSeconds === p.sec
+                    ? 'bg-amber-600 text-white shadow-xs'
+                    : 'bg-white text-slate-700 border border-slate-200 hover:bg-amber-50'
+                }`}
+              >
+                {p.label}
+              </button>
+            ))}
+          </div>
+
+          <p className="text-[11px] text-slate-500 bg-white/70 p-2.5 rounded-lg border border-amber-100">
+            💡 <strong>How it works:</strong> When medical students trigger <code>/rapidfire 5 pharmacology</code> or <code>/rapidfire 10 cardiology</code>, the bot sends native Telegram Quiz polls with an active ticking countdown. When the timer hits 0, Telegram locks in votes automatically and reveals the high-yield rationale! Users can also type <code>/timer 20</code> directly in Telegram.
+          </p>
         </div>
 
         {/* Live Prompt Testing Sandbox */}

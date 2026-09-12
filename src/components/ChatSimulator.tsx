@@ -21,6 +21,9 @@ import {
   ChevronDown,
   ChevronUp,
   Loader2,
+  Timer,
+  Zap,
+  AlertCircle
 } from 'lucide-react';
 import { MediaAttachment, QuizPollData } from '../types';
 
@@ -51,12 +54,13 @@ interface ChatSimulatorProps {
 }
 
 const SAMPLE_PROMPTS = [
+  "⚡️ rapidfire 5 pharmacology 15s",
+  "⚡️ /rapidfire 10 cardiology",
   "📊 5 quizzes on heart anatomy",
-  "📊 quiz on pharmacology",
   "🎯 mcq on renal pathology",
   "🫀 heart image",
   "📄 download pdf notes on Asthma",
-  "💡 High-yield exam prep tips & mnemonics",
+  "⏱️ /timer 20",
 ];
 
 function InteractiveQuizWidget({
@@ -72,33 +76,96 @@ function InteractiveQuizWidget({
 }) {
   const [selectedIdx, setSelectedIdx] = useState<number | null>(null);
   const [showRationale, setShowRationale] = useState(false);
+  const initialSeconds = quiz.countdownSeconds || (quiz.isRapidFire ? 30 : null);
+  const [timeLeft, setTimeLeft] = useState<number | null>(initialSeconds);
+  const [timeExpired, setTimeExpired] = useState(false);
 
-  const isAnswered = selectedIdx !== null;
+  useEffect(() => {
+    if (timeLeft === null || selectedIdx !== null || timeExpired) return;
+
+    if (timeLeft <= 0) {
+      setTimeExpired(true);
+      return;
+    }
+
+    const timer = setInterval(() => {
+      setTimeLeft((prev) => {
+        if (prev === null || prev <= 1) {
+          clearInterval(timer);
+          setTimeExpired(true);
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+
+    return () => clearInterval(timer);
+  }, [timeLeft, selectedIdx, timeExpired]);
+
+  const isAnswered = selectedIdx !== null || timeExpired;
+
+  const isRapid = quiz.isRapidFire || (quiz.countdownSeconds && quiz.countdownSeconds > 0);
 
   return (
-    <div className="mt-2.5 p-3.5 rounded-xl border border-teal-200 bg-gradient-to-b from-teal-50/70 to-slate-50 text-slate-800 space-y-3">
+    <div className={`mt-2.5 p-3.5 rounded-xl border transition-all text-slate-800 space-y-3 ${
+      isRapid
+        ? 'border-amber-300 bg-gradient-to-b from-amber-50/80 via-white to-amber-50/30'
+        : 'border-teal-200 bg-gradient-to-b from-teal-50/70 to-slate-50'
+    }`}>
       {/* Header Badge */}
-      <div className="flex items-center justify-between">
-        <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-bold bg-teal-700 text-white shadow-2xs">
-          <span>📊</span>
-          {quizNumber && totalQuizzes && totalQuizzes > 1
-            ? `Telegram Quiz Poll ${quizNumber} of ${totalQuizzes}`
-            : 'Telegram Interactive Quiz Poll'}
-        </span>
+      <div className="flex items-center justify-between gap-2 flex-wrap">
+        <div className="flex items-center gap-1.5">
+          <span className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-bold shadow-2xs ${
+            isRapid
+              ? 'bg-amber-600 text-white'
+              : 'bg-teal-700 text-white'
+          }`}>
+            <span>{isRapid ? '⚡️' : '📊'}</span>
+            {quizNumber && totalQuizzes && totalQuizzes > 1
+              ? `${isRapid ? 'Rapid-Fire' : 'Quiz Poll'} ${quizNumber} of ${totalQuizzes}`
+              : isRapid ? 'Rapid-Fire Timed Poll' : 'Interactive Quiz Poll'}
+          </span>
+
+          {timeLeft !== null && (
+            <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs font-mono font-bold border transition-colors ${
+              timeExpired
+                ? 'bg-rose-100 text-rose-800 border-rose-300'
+                : timeLeft <= 5
+                ? 'bg-rose-50 text-rose-700 border-rose-300 animate-pulse'
+                : 'bg-amber-100 text-amber-900 border-amber-300'
+            }`}>
+              <Timer className="w-3.5 h-3.5" />
+              <span>{timeExpired ? 'Time Expired!' : `${timeLeft}s`}</span>
+            </span>
+          )}
+        </div>
+
         <button
           onClick={onDownloadPdf}
-          className="text-xs text-teal-800 hover:text-teal-950 font-medium inline-flex items-center gap-1 bg-white border border-teal-200 hover:border-teal-300 px-2 py-1 rounded-md shadow-2xs transition-colors cursor-pointer"
+          className="text-xs text-slate-700 hover:text-slate-950 font-medium inline-flex items-center gap-1 bg-white border border-slate-200 hover:border-slate-300 px-2 py-1 rounded-md shadow-2xs transition-colors cursor-pointer"
           title="Download this quiz and rationale as a PDF"
         >
-          <FileDown className="w-3.5 h-3.5 text-teal-700" />
+          <FileDown className="w-3.5 h-3.5 text-slate-600" />
           <span>Save PDF</span>
         </button>
       </div>
 
+      {/* Countdown Progress Bar */}
+      {initialSeconds && initialSeconds > 0 && !isAnswered && (
+        <div className="w-full bg-slate-200/80 rounded-full h-1.5 overflow-hidden">
+          <div
+            className={`h-full transition-all duration-1000 ease-linear ${
+              (timeLeft || 0) <= 5 ? 'bg-rose-500' : 'bg-amber-500'
+            }`}
+            style={{ width: `${Math.max(0, Math.min(100, (((timeLeft || 0) / initialSeconds) * 100)))}%` }}
+          />
+        </div>
+      )}
+
       {/* Scenario if present */}
       {quiz.scenario && (
         <div className="p-2.5 rounded-lg bg-white border border-slate-200 text-xs sm:text-sm text-slate-700 leading-relaxed">
-          <span className="font-bold text-teal-900 block mb-1">📋 Clinical Scenario:</span>
+          <span className="font-bold text-slate-900 block mb-1">📋 Clinical Scenario:</span>
           {quiz.scenario}
         </div>
       )}
@@ -114,7 +181,7 @@ function InteractiveQuizWidget({
           const isSelected = selectedIdx === idx;
           const isCorrect = idx === quiz.correctOptionId;
 
-          let btnClass = "bg-white border-slate-200 hover:border-teal-400 text-slate-800 hover:bg-teal-50/40";
+          let btnClass = "bg-white border-slate-200 hover:border-amber-400 text-slate-800 hover:bg-amber-50/40";
           if (isAnswered) {
             if (isCorrect) {
               btnClass = "bg-emerald-50 border-emerald-500 text-emerald-950 font-semibold shadow-xs";
@@ -164,17 +231,25 @@ function InteractiveQuizWidget({
           {/* Result Alert */}
           <div
             className={`p-2.5 rounded-lg border text-xs flex items-start gap-2 ${
-              selectedIdx === quiz.correctOptionId
+              timeExpired && selectedIdx === null
+                ? 'bg-amber-50 border-amber-200 text-amber-950'
+                : selectedIdx === quiz.correctOptionId
                 ? 'bg-emerald-50 border-emerald-200 text-emerald-900'
                 : 'bg-rose-50 border-rose-200 text-rose-900'
             }`}
           >
             <span className="text-base">
-              {selectedIdx === quiz.correctOptionId ? '🎉' : '❌'}
+              {timeExpired && selectedIdx === null
+                ? '⏱️'
+                : selectedIdx === quiz.correctOptionId
+                ? '🎉'
+                : '❌'}
             </span>
             <div>
               <p className="font-bold">
-                {selectedIdx === quiz.correctOptionId
+                {timeExpired && selectedIdx === null
+                  ? `Time Expired! Auto-locked. Correct Answer is Option ${String.fromCharCode(65 + quiz.correctOptionId)}:`
+                  : selectedIdx === quiz.correctOptionId
                   ? 'Correct! High-Yield Clinical Explanation:'
                   : `Incorrect (Correct is ${String.fromCharCode(65 + quiz.correctOptionId)}):`}
               </p>
@@ -187,7 +262,7 @@ function InteractiveQuizWidget({
             <div className="pt-1">
               <button
                 onClick={() => setShowRationale(!showRationale)}
-                className="text-xs font-semibold text-teal-800 hover:text-teal-950 flex items-center gap-1 cursor-pointer"
+                className="text-xs font-semibold text-slate-700 hover:text-slate-950 flex items-center gap-1 cursor-pointer"
               >
                 <span>{showRationale ? 'Hide Detailed Rationale' : '📖 View Detailed Clinical Rationale & Board Pearls'}</span>
                 {showRationale ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}

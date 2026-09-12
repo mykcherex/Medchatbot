@@ -15,6 +15,8 @@ export interface QuizData {
   explanation: string;
   fullRationale?: string;
   topic?: string;
+  countdownSeconds?: number;
+  isRapidFire?: boolean;
 }
 
 export interface LongTextCaseQuestion {
@@ -39,6 +41,8 @@ export interface UserPromptIntent {
   isPollRequested: boolean;
   isTextCaseRequested: boolean;
   isMcqRequested: boolean;
+  isRapidFire: boolean;
+  customTimerSeconds?: number;
   rawPrompt: string;
 }
 
@@ -62,18 +66,31 @@ export function parseUserPromptIntent(rawPrompt: string, defaultTopic: string = 
   const isLongCase = /\b(long|long text|detailed|extended|in-depth|comprehensive|full vignette|long case|vignettes|vignette|case study|cases|case questions)\b/i.test(text);
   const allowScenario = isLongCase || /\b(clinical case|clinical scenario|vignette|patient|case study|clinical vignette|patient vignette|presentation|findings|hx|history)\b/i.test(text);
 
-  // 3. Format flags
-  const isPollRequested = /\b(poll|polls|telegram poll|quiz|quizzes|interactive quiz|\/quiz)\b/i.test(text) && !/\b(text case|written case|case document|pdf|no poll)\b/i.test(text);
-  const isTextCaseRequested = /\b(text case|case questions|clinical questions|written questions|case studies|question bank|long text case)\b/i.test(text) || (isLongCase && !isPollRequested && (/\b(questions?|cases?|items?)\b/i.test(text)));
+  // 3. Format flags & Rapid Fire detection
+  const isRapidFire = /\b(rapidfire|rapid fire|rapid-fire|speed mcq|speed quiz|speed test|timed quiz|timed mcq|timed exam|rapid exam|rapid mcq|timed test|\/rapidfire|\/rapid|\/speed|\/timed|\/timedquiz)\b/i.test(text);
+  const isPollRequested = isRapidFire || (/\b(poll|polls|telegram poll|quiz|quizzes|interactive quiz|\/quiz)\b/i.test(text) && !/\b(text case|written case|case document|pdf|no poll)\b/i.test(text));
+  const isTextCaseRequested = !isRapidFire && (/\b(text case|case questions|clinical questions|written questions|case studies|question bank|long text case)\b/i.test(text) || (isLongCase && !isPollRequested && (/\b(questions?|cases?|items?)\b/i.test(text))));
   const isMcqRequested = /\b(mcq|mcqs|\/mcq|multiple choice)\b/i.test(text);
 
+  // Custom countdown timer detection (e.g. "15s", "20 sec", "45 seconds", "timer 30", "30s timer")
+  let customTimerSeconds: number | undefined;
+  const timerMatch = text.match(/\b(?:timer|countdown|time|duration)?\s*(\d{1,3})\s*(?:s|sec|secs|seconds|second)\b/i) ||
+                     text.match(/\b(?:timer|countdown)\s*[:=]?\s*(\d{1,3})\b/i);
+  if (timerMatch && timerMatch[1]) {
+    const parsedSec = parseInt(timerMatch[1], 10);
+    if (parsedSec >= 5 && parsedSec <= 600) {
+      customTimerSeconds = parsedSec;
+    }
+  }
+
   // 4. Count extraction (supports up to 50!)
-  let count = 1;
+  let count = isRapidFire ? 5 : 1; // Default to 5 questions for rapid fire sprints
   const countRegexes = [
     /\b(\d+)\s*(?:long\s+)?(?:text\s+)?(?:case\s+)?(?:questions?|quizzes|quiz|mcqs?|items?|cases?|polls?|vignettes?)\b/i,
     /(?:generate|give me|create|send|make|produce|write|test me with)\s*(\d+)\s*(?:long\s+)?(?:text\s+)?(?:case\s+)?(?:questions?|quizzes|quiz|mcqs?|items?|cases?|polls?|vignettes?)?/i,
-    /(?:\/quiz|\/mcq|quiz|mcq)\s*(\d+)\b/i,
-    /\b(\d+)\s*(?:interactive\s*)?quiz(?:zes)?\b/i
+    /(?:\/quiz|\/mcq|\/rapidfire|\/rapid|\/timed|\/speed|quiz|mcq|rapidfire)\s*(\d+)\b/i,
+    /\b(\d+)\s*(?:interactive\s*)?quiz(?:zes)?\b/i,
+    /\b(\d+)\s*(?:rapid\s*fire|timed|speed)?\s*(?:questions?|mcqs?|polls?)\b/i
   ];
 
   for (const reg of countRegexes) {
@@ -97,10 +114,13 @@ export function parseUserPromptIntent(rawPrompt: string, defaultTopic: string = 
 
   // 5. Clean Topic Extraction
   let topic = text
-    .replace(/^\/(?:quiz|mcq|poll|cases?)\s*/i, "")
+    .replace(/^\/(?:quiz|mcq|poll|cases?|rapidfire|rapid|timed|speed|timedquiz)\s*/i, "")
     .replace(/(?:generate|give me|create|send|make|produce|write|test me with|provide|ask me)\s*/i, "")
     .replace(/\b\d+\s*(?:long\s+)?(?:text\s+)?(?:case\s+)?(?:questions?|quizzes|quiz|mcqs?|items?|cases?|polls?|vignettes?)?\b/gi, "")
     .replace(/\b(quiz me on|quiz on|quizzes on|interactive quiz|quiz|quizzes|poll questions|polls?|mcqs?|mcq)\b/gi, "")
+    .replace(/\b(rapidfire|rapid fire|rapid-fire|speed mcq|speed quiz|speed test|timed quiz|timed mcq|timed exam|rapid exam|timed test)\b/gi, "")
+    .replace(/\b\d+\s*(?:s|sec|secs|seconds|second)\b/gi, "")
+    .replace(/\b(?:timer|countdown)\s*[:=]?\s*\d+\b/gi, "")
     .replace(/\b(long text case questions|long text case|case questions|cases|case studies|vignettes?)\b/gi, "")
     .replace(/\b(harder|hard|difficult|very hard|complex|complicated|challenging)\b/gi, "")
     .replace(/\b(please|can you|i want|give|provide|about|on|for)\b/gi, "")
@@ -122,6 +142,8 @@ export function parseUserPromptIntent(rawPrompt: string, defaultTopic: string = 
     isPollRequested,
     isTextCaseRequested,
     isMcqRequested,
+    isRapidFire,
+    customTimerSeconds,
     rawPrompt: text,
   };
 }
@@ -159,6 +181,7 @@ export interface BotState {
     medicalSpecialty?: string;
     examLevel?: string;
     activeSubjects?: string[];
+    rapidFireCountdownSeconds?: number;
   };
   stats: {
     totalMessages: number;
@@ -276,6 +299,7 @@ class TelegramBotManager {
     medicalSpecialty: "All Medical Sciences",
     examLevel: "USMLE Step 1 / 2 CK & Board Prep",
     activeSubjects: ["Anatomy", "Physiology", "Biochemistry", "Microbiology", "Pathology", "Pharmacology"],
+    rapidFireCountdownSeconds: 30,
   };
 
   private stats = {
@@ -1190,7 +1214,8 @@ Tap an option below or send your first medical question to begin!`;
     options: string[],
     correctOptionId: number,
     explanation?: string,
-    isAnonymous: boolean = false
+    isAnonymous: boolean = false,
+    openPeriodSeconds?: number
   ): Promise<any> {
     try {
       const cleanOptions = options && options.length >= 2
@@ -1210,6 +1235,10 @@ Tap an option below or send your first medical question to begin!`;
 
       if (explanation && explanation.trim().length > 0) {
         payload.explanation = explanation.slice(0, 200);
+      }
+
+      if (openPeriodSeconds && openPeriodSeconds >= 5 && openPeriodSeconds <= 600) {
+        payload.open_period = Math.round(openPeriodSeconds);
       }
 
       const res = await fetch(`${this.getApiBase()}/sendPoll`, {
@@ -1408,12 +1437,16 @@ Tap an option below or send your first medical question to begin!`;
     return {
       inline_keyboard: [
         [
-          { text: "📊 Interactive Quiz Poll", callback_data: "action_quiz_random" },
-          { text: "🎯 Clinical Board MCQ", callback_data: "action_mcq_random" },
+          { text: "⚡️ Rapid Fire Exam (Timed)", callback_data: "action_rapidfire_random" },
+          { text: "📊 Interactive Quiz", callback_data: "action_quiz_random" },
         ],
         [
+          { text: "🎯 Clinical Board MCQ", callback_data: "action_mcq_random" },
           { text: "💡 Medical Exam Tips", callback_data: "action_exam_tips" },
+        ],
+        [
           { text: "📄 Export PDF Notes", callback_data: "action_export_pdf" },
+          { text: "⏱️ Timer Settings", callback_data: "action_timer_menu" },
         ],
         [
           { text: "📸 Medical Vision & Docs Guide", callback_data: "action_multimodal_guide" },
@@ -1437,7 +1470,8 @@ Tap an option below or send your first medical question to begin!`;
   public getPersistentReplyKeyboard() {
     return {
       keyboard: [
-        [{ text: "📄 Export PDF Notes" }, { text: "📊 Interactive Quiz" }],
+        [{ text: "⚡️ Rapid Fire Exam" }, { text: "📊 Interactive Quiz" }],
+        [{ text: "📄 Export PDF Notes" }, { text: "⏱️ Timer Settings" }],
         [{ text: "🧹 Reset Memory" }, { text: "⚙️ Custom Prompt" }],
       ],
       resize_keyboard: true,
@@ -2210,6 +2244,112 @@ ${sanitizeTelegramMarkdown(c.distractorAnalysis)}
     }
   }
 
+  // High-Yield Rapid Fire Timed Exam Simulator (Supports custom question count + adjustable countdown timers per poll)
+  public async handleRapidFireExam(
+    chatId: number | string,
+    sender: any,
+    userName: string,
+    userHandle: string | undefined,
+    text: string,
+    intent?: UserPromptIntent,
+    attachments: MediaAttachment[] = []
+  ): Promise<void> {
+    const promptIntent = intent || parseUserPromptIntent(text);
+    const count = promptIntent.count > 1 ? promptIntent.count : (/\b\d+\b/.test(text) ? promptIntent.count : 5);
+    const topic = promptIntent.topic || "General Medical Board Review";
+    const countdownSeconds = promptIntent.customTimerSeconds || this.config.rapidFireCountdownSeconds || 30;
+    const clampedTimer = Math.max(5, Math.min(600, countdownSeconds));
+
+    await this.sendChatAction(chatId, "typing");
+
+    // Introductory Banner
+    const introBanner = `⚡️ *HIGH-YIELD RAPID-FIRE EXAM SIMULATOR*
+━━━━━━━━━━━━━━━━━━━━━
+🎯 *Target Topic:* \`${topic}\`
+📊 *Question Count:* \`${count} Single-Best-Answer MCQs\`
+⏱️ *Countdown Timer:* \`${clampedTimer}s per question\` (Active Ticking)
+🔒 *Auto-Lock:* _Poll automatically closes and locks in answers when timer reaches 0!_
+━━━━━━━━━━━━━━━━━━━━━
+🚀 *Generating ${count} rapid-fire board items... Get ready!*`;
+
+    await this.sendMessage(chatId, introBanner, "Markdown");
+
+    try {
+      const { quizzes, textSummary, latencyMs } = await this.generateInteractiveQuizzes(
+        text,
+        topic,
+        count,
+        attachments
+      );
+
+      for (let i = 0; i < quizzes.length; i++) {
+        const quiz = quizzes[i];
+
+        // Format question stem with rapid fire indicator and countdown timer badge
+        const questionStem = `[⚡️ Q${i + 1}/${quizzes.length} • ⏱️${clampedTimer}s] ${quiz.question}`;
+
+        // Send native Telegram interactive Quiz Poll with open_period active countdown timer
+        await this.sendPoll(
+          chatId,
+          questionStem.slice(0, 290),
+          quiz.options,
+          quiz.correctOptionId,
+          quiz.explanation,
+          false,
+          clampedTimer
+        );
+
+        // Brief delay between polls to maintain pristine delivery order
+        if (quizzes.length > 1 && i < quizzes.length - 1) {
+          await new Promise((resolve) => setTimeout(resolve, 350));
+        }
+      }
+
+      // Completion & summary banner
+      const completionBanner = `🏁 *RAPID-FIRE SPRINT COMPLETED!*
+━━━━━━━━━━━━━━━━━━━━━
+✅ *Delivered:* \`${quizzes.length} Timed MCQs\`
+🎯 *Discipline:* \`${topic}\`
+⏱️ *Pace:* \`${clampedTimer}s per question\`
+━━━━━━━━━━━━━━━━━━━━━
+💡 *Performance Tip:* Tap any closed poll above to review your score and read the high-yield rationale.
+
+• 📄 _Type_ \`/pdf\` _to export this rapid-fire set as a study PDF._
+• ⚡️ _Type_ \`/rapidfire ${count} ${topic}\` _to run another timed session._
+• ⏱️ _Type_ \`/timer <seconds>\` _to adjust your countdown timer (e.g. \`/timer 20\`)._`;
+
+      await this.sendMessage(chatId, completionBanner, "Markdown");
+
+      const history = this.chatHistories.get(chatId) || [];
+      history.push({ role: "user", text });
+      history.push({ role: "model", text: textSummary });
+      this.chatHistories.set(chatId, history.slice(-12));
+
+      this.lastBotResponseByChat.set(chatId, {
+        text: textSummary,
+        topic: `Rapid Fire Exam (${topic})`,
+        sourceType: 'quiz',
+        timestamp: Date.now(),
+      });
+
+      this.logActivity({
+        id: `rapid-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+        chatId,
+        userName,
+        userHandle,
+        userMessage: text,
+        aiResponse: `[Rapid Fire: ${quizzes.length} timed poll(s) (${clampedTimer}s) on ${topic}]`,
+        latencyMs,
+        timestamp: new Date().toISOString(),
+        status: "success",
+        source: "telegram",
+      });
+    } catch (err: any) {
+      console.error("[Telegram] Rapid Fire generation error:", err);
+      await this.sendMessage(chatId, "⚠️ Error generating rapid-fire questions. Please try again with `/rapidfire`.");
+    }
+  }
+
   // Backwards-compatible single interactive quiz generator
   public async generateInteractiveQuiz(topic: string = "general"): Promise<{
     quiz: QuizData;
@@ -2289,7 +2429,33 @@ ${sanitizeTelegramMarkdown(c.distractorAnalysis)}
     await this.sendChatAction(chatId, "typing");
 
     try {
-      if (data.startsWith("action_quiz_")) {
+      if (data.startsWith("action_rapidfire_")) {
+        const subject = data.replace("action_rapidfire_", "");
+        const cleanSubject = subject === "random" ? "General Medical Board Review" : subject;
+        await this.handleRapidFireExam(
+          chatId,
+          fromUser,
+          userName,
+          userHandle,
+          `rapidfire 5 ${cleanSubject}`
+        );
+      } else if (data === "action_timer_menu") {
+        const currentTimer = this.config.rapidFireCountdownSeconds || 30;
+        await this.sendMessage(
+          chatId,
+          `⏱️ *Rapid Fire Countdown Timer Settings*\n\n` +
+          `• *Current Default Countdown:* \`${currentTimer} seconds\`\n` +
+          `• *Allowed Range:* 5 to 600 seconds\n\n` +
+          `🔧 *To Change Countdown Duration:*\n` +
+          `Send \`/timer <seconds>\` anytime, for example:\n` +
+          `• \`/timer 15\` (Ultra-fast 15s blitz)\n` +
+          `• \`/timer 30\` (Standard 30s board pace)\n` +
+          `• \`/timer 45\` (Moderate 45s analysis)\n` +
+          `• \`/timer 60\` (Relaxed 60s deep reasoning)\n\n` +
+          `⚡️ *Run a Timed Exam:* \`/rapidfire 10 cardiology\` or \`/rapidfire 5 pharm 20s\``,
+          "Markdown"
+        );
+      } else if (data.startsWith("action_quiz_")) {
         const subject = data.replace("action_quiz_", "");
         const cleanSubject = subject === "random" ? "General Medical Board Review" : subject;
         const { quiz, textSummary, latencyMs } = await this.generateInteractiveQuiz(cleanSubject);
@@ -3377,10 +3543,57 @@ Medchat is equipped with multimodal perception powered by Google Gemini!
       return;
     }
 
-    // Parse user intent for count, difficulty, complexity, format (polls vs long cases)
+    // 3b. Rapid Fire Timer Configuration Command (e.g. /timer 20, /countdown 15, /timer, ⏱️ Timer Settings)
+    if (text.startsWith("/timer") || text.startsWith("/countdown") || text === "⏱️ Timer Settings") {
+      const parts = text.split(/\s+/);
+      if (parts.length > 1 && !isNaN(parseInt(parts[1], 10))) {
+        const newSec = Math.max(5, Math.min(600, parseInt(parts[1], 10)));
+        this.config.rapidFireCountdownSeconds = newSec;
+        this.syncAndPersistState();
+        await this.sendMessage(
+          chatId,
+          `⏱️ *Rapid Fire Countdown Timer Updated!*\n\n• *New Default Timer:* \`${newSec} seconds\` per MCQ\n• *Status:* Saved & active for all subsequent \`/rapidfire\` sessions.\n\n🚀 _Test it now:_ \`/rapidfire 5\``,
+          "Markdown"
+        );
+      } else {
+        const currentTimer = this.config.rapidFireCountdownSeconds || 30;
+        await this.sendMessage(
+          chatId,
+          `⏱️ *Rapid Fire Countdown Timer Settings*\n\n` +
+          `• *Current Default Countdown:* \`${currentTimer} seconds\`\n` +
+          `• *Allowed Range:* 5 to 600 seconds\n\n` +
+          `🔧 *To Change the Timer Duration:*\n` +
+          `Send \`/timer <seconds>\` anytime, for example:\n` +
+          `• \`/timer 15\` (Ultra-fast 15s blitz)\n` +
+          `• \`/timer 30\` (Standard 30s board pace)\n` +
+          `• \`/timer 45\` (Moderate 45s analysis)\n` +
+          `• \`/timer 60\` (Relaxed 60s deep reasoning)\n\n` +
+          `⚡️ *Run a Rapid-Fire Exam:* \`/rapidfire 10 cardiology\` or \`/rapidfire 5 pharm 15s\``,
+          "Markdown"
+        );
+      }
+      return;
+    }
+
+    // Parse user intent for count, difficulty, complexity, format (polls vs long cases vs rapid fire)
     const intent = parseUserPromptIntent(text);
 
-    // 4. Long Text Case Questions Request (e.g., "generate 50 long text case questions", "give me 10 complex cases", "harder cases on cardiology")
+    // 4. Rapid Fire Timed Exam Simulator (e.g. /rapidfire, /rapid, /timed, "rapid fire", "⚡️ Rapid Fire Exam")
+    const isRapidFireReq =
+      intent.isRapidFire ||
+      text.startsWith("/rapidfire") ||
+      text.startsWith("/rapid") ||
+      text.startsWith("/timed") ||
+      text.startsWith("/speed") ||
+      text === "⚡️ Rapid Fire Exam" ||
+      text === "⚡️ Rapid Fire Exam (Timed)";
+
+    if (isRapidFireReq) {
+      await this.handleRapidFireExam(chatId, sender, userName, userHandle, text, intent);
+      return;
+    }
+
+    // 4b. Long Text Case Questions Request (e.g., "generate 50 long text case questions", "give me 10 complex cases", "harder cases on cardiology")
     const isExplicitCaseQuestions =
       intent.isTextCaseRequested ||
       (intent.isLongCase && !intent.isPollRequested && (intent.count > 1 || /\b(questions?|cases?|items?|vignettes?)\b/i.test(text))) ||
@@ -3748,10 +3961,18 @@ CRITICAL INSTRUCTION:
     quiz?: QuizData;
     quizzes?: QuizData[];
   }> {
-    // 1. Check if user is requesting an interactive quiz (prompted with the word "quiz" or "quizzes")
-    const isQuizPrompt = /\bquiz(?:zes)?\b/i.test(prompt) || prompt.trim().startsWith("/quiz");
+    // 1. Check if user is requesting an interactive quiz or rapid-fire exam
+    const intent = parseUserPromptIntent(prompt);
+    const isQuizPrompt = intent.isRapidFire || intent.isPollRequested || /\bquiz(?:zes)?\b/i.test(prompt) || prompt.trim().startsWith("/quiz") || prompt.trim().startsWith("/rapidfire");
     if (isQuizPrompt && (!attachments || attachments.length === 0)) {
       const { quizzes, textSummary, latencyMs, count, topic } = await this.generateInteractiveQuizzes(prompt);
+
+      const countdownSec = intent.customTimerSeconds || this.config.rapidFireCountdownSeconds || 30;
+      const formattedQuizzes = quizzes.map((q, idx) => ({
+        ...q,
+        isRapidFire: intent.isRapidFire,
+        countdownSeconds: intent.isRapidFire ? countdownSec : undefined,
+      }));
 
       this.stats.totalMessages++;
       this.totalLatencySum += latencyMs;
@@ -3773,8 +3994,8 @@ CRITICAL INSTRUCTION:
       return {
         reply: textSummary,
         latencyMs,
-        quiz: quizzes[0],
-        quizzes,
+        quiz: formattedQuizzes[0],
+        quizzes: formattedQuizzes,
       };
     }
 

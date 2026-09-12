@@ -26,6 +26,7 @@ export interface BotConfig {
   medicalSpecialty?: string;
   examLevel?: string;
   activeSubjects?: string[];
+  rapidFireCountdownSeconds?: number;
 }
 
 export interface MediaAttachment {
@@ -50,6 +51,8 @@ export interface QuizPollData {
   explanation: string;
   fullRationale?: string;
   topic?: string;
+  countdownSeconds?: number;
+  isRapidFire?: boolean;
 }
 
 export interface BotStats {

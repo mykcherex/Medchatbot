@@ -27,6 +27,7 @@ export interface BotConfigData {
   medicalSpecialty: string;
   examLevel: string;
   activeSubjects: string[];
+  rapidFireCountdownSeconds?: number;
 }
 
 export interface BotPersistentState {
@@ -76,6 +77,7 @@ export function getDefaultBotState(): BotPersistentState {
       medicalSpecialty: "All Medical Sciences",
       examLevel: "USMLE Step 1 / 2 CK & Board Prep",
       activeSubjects: ["Anatomy", "Physiology", "Biochemistry", "Microbiology", "Pathology", "Pharmacology"],
+      rapidFireCountdownSeconds: 30,
     },
     customSystemPrompts: {},
     stats: {
