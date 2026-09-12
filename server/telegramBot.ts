@@ -19,6 +19,8 @@ export interface QuizData {
   topic?: string;
   countdownSeconds?: number;
   isRapidFire?: boolean;
+  imageUrl?: string;
+  wikipediaTitleForImage?: string;
 }
 
 export interface LongTextCaseQuestion {
@@ -44,6 +46,7 @@ export interface UserPromptIntent {
   isTextCaseRequested: boolean;
   isMcqRequested: boolean;
   isRapidFire: boolean;
+  isWebQuizRequested: boolean;
   customTimerSeconds?: number;
   rawPrompt: string;
 }
@@ -70,8 +73,9 @@ export function parseUserPromptIntent(rawPrompt: string, defaultTopic: string = 
 
   // 3. Format flags & Rapid Fire detection
   const isRapidFire = /\b(rapidfire|rapid fire|rapid-fire|speed mcq|speed quiz|speed test|timed quiz|timed mcq|timed exam|rapid exam|rapid mcq|timed test|\/rapidfire|\/rapid|\/speed|\/timed|\/timedquiz)\b/i.test(text);
-  const isPollRequested = isRapidFire || (/\b(poll|polls|telegram poll|quiz|quizzes|interactive quiz|\/quiz)\b/i.test(text) && !/\b(text case|written case|case document|pdf|no poll)\b/i.test(text));
-  const isTextCaseRequested = !isRapidFire && (/\b(text case|case questions|clinical questions|written questions|case studies|question bank|long text case)\b/i.test(text) || (isLongCase && !isPollRequested && (/\b(questions?|cases?|items?)\b/i.test(text))));
+  const isWebQuizRequested = /\b(webquiz|web quiz|web-quiz|web quizzes|fetch.*web.*quiz|quiz.*from.*web)\b/i.test(text);
+  const isPollRequested = isRapidFire || isWebQuizRequested || (/\b(poll|polls|telegram poll|quiz|quizzes|interactive quiz|\/quiz)\b/i.test(text) && !/\b(text case|written case|case document|pdf|no poll)\b/i.test(text));
+  const isTextCaseRequested = !isRapidFire && !isWebQuizRequested && (/\b(text case|case questions|clinical questions|written questions|case studies|question bank|long text case)\b/i.test(text) || (isLongCase && !isPollRequested && (/\b(questions?|cases?|items?)\b/i.test(text))));
   const isMcqRequested = /\b(mcq|mcqs|\/mcq|multiple choice)\b/i.test(text);
 
   // Custom countdown timer detection (e.g. "15s", "20 sec", "45 seconds", "timer 30", "30s timer")
@@ -1463,23 +1467,50 @@ Tap an option below or send your first medical question to begin!`;
     const rawQuestion = prefixStem ? `${prefixStem} ${quiz.question}` : quiz.question;
     const hasScenario = !!quiz.scenario && quiz.scenario.trim().length > 0;
     
+    // Send the image first if available
+    let photoMessageId: number | undefined;
+    if (quiz.imageUrl) {
+      try {
+        const photoRes = await fetch(`${this.getApiBase()}/sendPhoto`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            chat_id: chatId,
+            photo: quiz.imageUrl
+          })
+        });
+        const photoData = await photoRes.json();
+        if (photoData.ok) {
+          photoMessageId = photoData.result.message_id;
+        }
+      } catch (e) {
+        console.error("Failed to send quiz image:", e);
+      }
+    }
+    
     // If the question alone exceeds Telegram's limit (300) OR there is a scenario, we split it up.
     if (rawQuestion.length > 290 || hasScenario) {
       // Clean up the header to include the prefix (e.g. Q1/50)
       const headerPrefix = prefixStem ? ` ${prefixStem.replace(/[\[\]]/g, '')}` : "";
       const fullText = `📋 *Clinical Vignette${headerPrefix}:*\n\n${hasScenario ? quiz.scenario + "\n\n" : ""}${quiz.question}`;
       
+      const payload: any = {
+        chat_id: chatId,
+        text: fullText.slice(0, 4000),
+        parse_mode: "Markdown"
+      };
+      // Link the text to the photo if we just sent one
+      if (photoMessageId) {
+        payload.reply_to_message_id = photoMessageId;
+      }
+      
       const msgRes = await fetch(`${this.getApiBase()}/sendMessage`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          chat_id: chatId,
-          text: fullText.slice(0, 4000),
-          parse_mode: "Markdown"
-        })
+        body: JSON.stringify(payload)
       });
       const msgData = await msgRes.json();
-      const replyToId = msgData?.ok ? msgData.result?.message_id : undefined;
+      const replyToId = msgData?.ok ? msgData.result?.message_id : (photoMessageId || undefined);
 
       const pollData = await this.sendPoll(
         chatId,
@@ -1516,12 +1547,43 @@ Tap an option below or send your first medical question to begin!`;
         quiz.correctOptionId,
         quiz.explanation,
         isAnonymous,
-        openPeriodSeconds
+        openPeriodSeconds,
+        photoMessageId
       );
     }
   }
 
-  // Telegram Document Upload (e.g. PDF generation & download)
+  public async fetchWikipediaMedicalImage(topic: string): Promise<string | null> {
+    try {
+      // First, we ask Gemini to give us a highly specific Wikipedia page title for the given topic that is likely to have a good clinical image.
+      const prompt = `Given the broad medical topic "${topic}", provide exactly ONE specific medical diagnosis, condition, or sign that is highly likely to have a high-quality clinical photograph or diagram on its Wikipedia page. Return ONLY the Wikipedia page title string. No quotes, no formatting.`;
+      
+      const { text: pageTitle } = await generateGeminiReply(
+        prompt,
+        [],
+        "You are an API that returns a single Wikipedia page title. Output only the title.",
+        0.3,
+        [],
+        this.config.model
+      );
+
+      const cleanTitle = pageTitle.trim();
+      const apiUrl = `https://en.wikipedia.org/w/api.php?action=query&prop=pageimages&titles=${encodeURIComponent(cleanTitle)}&pithumbsize=600&format=json`;
+      const res = await fetch(apiUrl);
+      const data = await res.json();
+      
+      if (data && data.query && data.query.pages) {
+        const pages = Object.values(data.query.pages) as any[];
+        if (pages.length > 0 && pages[0].thumbnail && pages[0].thumbnail.source) {
+          return pages[0].thumbnail.source;
+        }
+      }
+      return null;
+    } catch (e) {
+      console.error("Wikipedia Image Fetch Error:", e);
+      return null;
+    }
+  }
   public async sendDocument(
     chatId: number | string,
     fileBuffer: Buffer,
@@ -1982,6 +2044,7 @@ Include:
     const allowScenario = intent.allowScenario;
     const isHarder = intent.isHarder;
     const isComplex = intent.isComplex;
+    const isWebQuizRequested = intent.isWebQuizRequested;
 
     // We generate quizzes in batches of at most 10 for parallel speed and reliability
     const batchSizes: number[] = [];
@@ -2002,7 +2065,8 @@ Include:
         userPrompt,
         batchIdx,
         batchSizes.length,
-        attachments
+        attachments,
+        isWebQuizRequested
       )
     );
 
@@ -2054,6 +2118,18 @@ Include:
       q.topic = topic;
     }
 
+    // Post-generation image fetching for Web Quizzes
+    if (isWebQuizRequested) {
+      for (let i = 0; i < allQuizzes.length; i++) {
+        if (allQuizzes[i].wikipediaTitleForImage) {
+          const imgUrl = await this.fetchWikipediaMedicalImage(allQuizzes[i].wikipediaTitleForImage!);
+          if (imgUrl) {
+             allQuizzes[i].imageUrl = imgUrl;
+          }
+        }
+      }
+    }
+
     this.stats.mcqsGenerated += allQuizzes.length;
     const latencyMs = Date.now() - startTime;
 
@@ -2090,7 +2166,8 @@ Include:
     userPrompt: string,
     batchIndex: number,
     totalBatches: number,
-    attachments: MediaAttachment[] = []
+    attachments: MediaAttachment[] = [],
+    isWebQuizRequested: boolean = false
   ): Promise<QuizData[]> {
     const focus = totalBatches > 1
       ? `(Batch ${batchIndex + 1} of ${totalBatches}: Focus on diverse aspects, mechanisms, structures, and common exam traps for ${topic})`
@@ -2112,6 +2189,10 @@ Include:
       ? `📸 IMAGE ATTACHMENT DIRECTIVE: You have received ${attachments.length} medical image(s). Base the quiz questions and findings directly on the visual structures, histology, or radiographic patterns visible in the uploaded image(s).`
       : "";
 
+    const webQuizDirective = isWebQuizRequested
+      ? `🌐 WEB QUIZ DIRECTIVE: The user requested a "web quiz" with images. For EACH question, you MUST provide a "wikipediaTitleForImage" field. This field must contain the EXACT Wikipedia page title (e.g. "Erythema migrans", "Tetralogy of Fallot") of the specific condition or anatomical structure tested in the question, so the system can fetch its public image. Choose conditions highly likely to have clinical images on Wikipedia.`
+      : "";
+
     const prompt = `Generate exactly ${count} distinct, high-yield, interactive multiple-choice quiz questions specifically testing "${topic}". ${focus}
 
 USER INTENT & CUSTOM INSTRUCTIONS:
@@ -2119,6 +2200,7 @@ The user specifically requested: "${userPrompt}"
 ${difficultyDirective}
 ${complexityDirective}
 ${attachmentDirective}
+${webQuizDirective}
 
 SCENARIO RULE:
 ${scenarioDirective}
@@ -2137,7 +2219,7 @@ Respond ONLY with a valid JSON array containing exactly ${count} object(s), with
     "correctOptionId": 0,
     "explanation": "High-yield concise rationale shown upon answering (MAXIMUM 195 characters)",
     "fullRationale": "Comprehensive medical explanation detailing why the correct option is right, why each distractor is wrong, and an exam pearl/mnemonic.",
-    "topic": "${topic}"
+    "topic": "${topic}"${isWebQuizRequested ? `,\n    "wikipediaTitleForImage": "Wikipedia page title for related image"` : ""}
   }
 ]
 
