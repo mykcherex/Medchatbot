@@ -2299,9 +2299,9 @@ ${sanitizeTelegramMarkdown(c.distractorAnalysis)}
           clampedTimer
         );
 
-        // Brief delay between polls to maintain pristine delivery order
+        // Wait for the countdown timer to finish plus a 2-second buffer before sending the next question
         if (quizzes.length > 1 && i < quizzes.length - 1) {
-          await new Promise((resolve) => setTimeout(resolve, 350));
+          await new Promise((resolve) => setTimeout(resolve, (clampedTimer + 2) * 1000));
         }
       }
 
