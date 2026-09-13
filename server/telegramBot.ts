@@ -2169,7 +2169,9 @@ Include:
     // Post-generation image fetching for Web Quizzes
     if (isWebQuizRequested) {
       for (let i = 0; i < allQuizzes.length; i++) {
-        if (allQuizzes[i].wikipediaTitleForImage) {
+        // If imageUrl was extracted directly from the web content, keep it!
+        // Otherwise, fetch from Wikipedia if a title was provided.
+        if (!allQuizzes[i].imageUrl && allQuizzes[i].wikipediaTitleForImage) {
           const imgUrl = await this.fetchWikipediaMedicalImage(allQuizzes[i].wikipediaTitleForImage!);
           if (imgUrl) {
              allQuizzes[i].imageUrl = imgUrl;
@@ -2238,7 +2240,7 @@ Include:
       : "";
 
     const webQuizDirective = isWebQuizRequested
-      ? `🌐 WEB QUIZ DIRECTIVE: The user requested a "web quiz" with images. For EACH question, you MUST provide a "wikipediaTitleForImage" field. This field must contain the EXACT Wikipedia page title (e.g. "Erythema migrans", "Tetralogy of Fallot") of the specific condition or anatomical structure tested in the question, so the system can fetch its public image. Choose conditions highly likely to have clinical images on Wikipedia.`
+      ? `🌐 WEB QUIZ DIRECTIVE: The user requested a "web quiz" with images. If the user provided website content containing image markdown links (e.g. ![alt](url)), extract the MOST relevant image URL and put it in the "imageUrl" field. If no direct image URL is available in the text, you MUST provide a "wikipediaTitleForImage" field with the EXACT Wikipedia page title (e.g. "Erythema migrans") of the specific condition so the system can fetch a public image.`
       : "";
 
     const prompt = `Generate exactly ${count} distinct, high-yield, interactive multiple-choice quiz questions specifically testing "${topic}". ${focus}
@@ -2267,7 +2269,7 @@ Respond ONLY with a valid JSON array containing exactly ${count} object(s), with
     "correctOptionId": 0,
     "explanation": "High-yield concise rationale shown upon answering (MAXIMUM 195 characters)",
     "fullRationale": "Comprehensive medical explanation detailing why the correct option is right, why each distractor is wrong, and an exam pearl/mnemonic.",
-    "topic": "${topic}"${isWebQuizRequested ? `,\n    "wikipediaTitleForImage": "Wikipedia page title for related image"` : ""}
+    "topic": "${topic}"${isWebQuizRequested ? `,\n    "imageUrl": "Direct URL to image if found in text",\n    "wikipediaTitleForImage": "Wikipedia page title for related image if direct URL not found"` : ""}
   }
 ]
 
@@ -4122,7 +4124,103 @@ Medchat is equipped with multimodal perception powered by Google Gemini!
     }
 
     // Parse user intent for count, difficulty, complexity, format (polls vs long cases vs rapid fire)
-    const intent = parseUserPromptIntent(text);
+    const originalIntent = parseUserPromptIntent(text);
+
+    // Check for YouTube Links first
+    const youtubeMatch = text.match(/(?:https?:\/\/)?(?:www\.)?(?:youtube\.com\/(?:[^\/\n\s]+\/\S+\/|(?:v|e(?:mbed)?)\/|\S*?[?&]v=)|youtu\.be\/)([a-zA-Z0-9_-]{11})/);
+    // Check for general Web Links (excluding YouTube)
+    const urlMatch = !youtubeMatch ? text.match(/https?:\/\/(www\.)?[-a-zA-Z0-9@:%._\+~#=]{1,256}\.[a-zA-Z0-9()]{1,6}\b([-a-zA-Z0-9()@:%_\+.~#?&//=]*)/i) : null;
+
+    if (youtubeMatch || urlMatch) {
+      let contextContent = "";
+      await this.sendChatAction(chatId, "typing");
+
+      try {
+        if (youtubeMatch && youtubeMatch[1]) {
+          const videoId = youtubeMatch[1];
+          await this.sendMessage(chatId, "⏳ *Fetching YouTube Transcript...*\n\nPlease wait while I analyze the video content.", "Markdown");
+          const transcriptArr = await YoutubeTranscript.fetchTranscript(videoId);
+          const transcriptText = transcriptArr.map(t => t.text).join(" ");
+          const truncatedTranscript = transcriptText.slice(0, 80000);
+          contextContent = `\n\n[Extracted YouTube Transcript]:\n${truncatedTranscript}\n`;
+        } else if (urlMatch) {
+          let targetUrl = urlMatch[0];
+          try {
+            const u = new URL(targetUrl);
+            if (u.hostname.includes("google.") && u.pathname === "/url") {
+              const embeddedUrl = u.searchParams.get("url") || u.searchParams.get("q");
+              if (embeddedUrl) targetUrl = embeddedUrl;
+            }
+          } catch (e) {}
+
+          await this.sendMessage(chatId, `⏳ *Reading Website...*\n\nExtracting content from:\n_${targetUrl}_\n\nPlease wait.`, "Markdown", { disable_web_page_preview: true });
+          const readerRes = await fetch(`https://r.jina.ai/${targetUrl}`);
+          if (!readerRes.ok) throw new Error("Failed to fetch from Jina API");
+          const markdownContent = await readerRes.text();
+          const truncatedContent = markdownContent.slice(0, 80000);
+          contextContent = `\n\n[Extracted Website Content]:\n${truncatedContent}\n`;
+        }
+
+        const isQuizWord =
+          originalIntent.isPollRequested ||
+          /\bquiz(?:zes)?\b/i.test(text) ||
+          text.startsWith("/quiz") ||
+          (originalIntent.count > 1 && /\b(polls?|poll questions?)\b/i.test(text));
+
+        const isRapidFireReq = originalIntent.isRapidFire || text.startsWith("/rapidfire") || text.startsWith("/rapid");
+
+        const textWithContext = `The user shared a web link with the following content:\n${contextContent}\n\nUser Request: ${text}\n\nFulfill the request using ONLY the content provided above.`;
+
+        if (isQuizWord || isRapidFireReq) {
+           await this.handleInteractiveQuizzes(chatId, sender, userName, userHandle, textWithContext, originalIntent);
+           return;
+        }
+
+        // Standard Conversational Prompt
+        const history = this.chatHistories.get(chatId) || [];
+        const { text: reply, latencyMs, modelUsed } = await generateGeminiReply(
+          textWithContext,
+          history,
+          this.getSystemPrompt(chatId),
+          this.config.temperature,
+          [],
+          this.config.model
+        );
+
+        history.push({ role: 'user', text });
+        history.push({ role: 'model', text: reply });
+        if (history.length > 12) {
+          this.chatHistories.set(chatId, history.slice(-12));
+        } else {
+          this.chatHistories.set(chatId, history);
+        }
+
+        this.totalLatencySum += latencyMs;
+        this.totalLatencyCount++;
+
+        await this.sendSmartMedicalMessage(chatId, reply, "Markdown");
+        
+        this.logActivity({
+          id: `msg-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+          chatId,
+          userName,
+          userHandle,
+          userMessage: text,
+          aiResponse: reply,
+          latencyMs,
+          timestamp: new Date().toISOString(),
+          status: 'success',
+          source: 'telegram',
+        });
+
+      } catch (err: any) {
+        console.error("[Telegram] Web link error:", err);
+        await this.sendMessage(chatId, "⚠️ *Error processing link*\n\nI could not fetch the content for this link. It might be heavily protected, restricted, or lacking readable text.", "Markdown");
+      }
+      return;
+    }
+
+    const intent = originalIntent;
 
     // 4. Rapid Fire Timed Exam Simulator (e.g. /rapidfire, /rapid, /timed, "rapid fire", "⚡️ Rapid Fire Exam")
     const isRapidFireReq =
@@ -4303,66 +4401,6 @@ Medchat is equipped with multimodal perception powered by Google Gemini!
       this.userStates.delete(chatId);
       this.syncAndPersistState();
       await this.sendMessage(chatId, `✅ *Custom prompt updated!*\n\nYour new prompt:\n_${text}_\n\nTo revert, send /resetprompt`, "Markdown");
-      return;
-    }
-
-    // Check for YouTube Links
-    const youtubeMatch = text.match(/(?:https?:\/\/)?(?:www\.)?(?:youtube\.com\/(?:[^\/\n\s]+\/\S+\/|(?:v|e(?:mbed)?)\/|\S*?[?&]v=)|youtu\.be\/)([a-zA-Z0-9_-]{11})/);
-    if (youtubeMatch && youtubeMatch[1]) {
-      const videoId = youtubeMatch[1];
-      await this.sendChatAction(chatId, "typing");
-      
-      try {
-        await this.sendMessage(chatId, "⏳ *Fetching YouTube Transcript...*\n\nPlease wait while I analyze the video content.", "Markdown");
-        
-        const transcriptArr = await YoutubeTranscript.fetchTranscript(videoId);
-        const transcriptText = transcriptArr.map(t => t.text).join(" ");
-        
-        // Ensure transcript fits within reasonable context window limits
-        const truncatedTranscript = transcriptText.slice(0, 80000); // Rough limit to keep prompt size manageable
-        
-        const prompt = `You are a medical AI assistant. The user has shared a YouTube video with the following transcript:\n\n<transcript>\n${truncatedTranscript}\n</transcript>\n\nHere is the user's specific request regarding this video:\n\n<user_request>\n${text}\n</user_request>\n\nPlease fulfill the user's request based strictly on the content of this video (and your medical knowledge to contextualize it). If the user asks you to generate questions, quizzes, or summarize, do so comprehensively and structure your response nicely.`;
-
-        const history = this.chatHistories.get(chatId) || [];
-        const { text: reply, latencyMs, modelUsed } = await generateGeminiReply(
-          prompt,
-          history,
-          this.getSystemPrompt(chatId),
-          this.config.temperature,
-          [],
-          this.config.model
-        );
-
-        history.push({ role: 'user', text });
-        history.push({ role: 'model', text: reply });
-        if (history.length > 12) {
-          this.chatHistories.set(chatId, history.slice(-12));
-        } else {
-          this.chatHistories.set(chatId, history);
-        }
-
-        this.totalLatencySum += latencyMs;
-        this.totalLatencyCount++;
-
-        await this.sendSmartMedicalMessage(chatId, reply, "Markdown");
-        
-        this.logActivity({
-          id: `msg-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
-          chatId,
-          userName,
-          userHandle,
-          userMessage: text,
-          aiResponse: reply,
-          latencyMs,
-          timestamp: new Date().toISOString(),
-          status: 'success',
-          source: 'telegram',
-        });
-
-      } catch (err: any) {
-        console.error("[Telegram] YouTube error:", err);
-        await this.sendMessage(chatId, "⚠️ *Error processing YouTube Video*\n\nI could not fetch the transcript for this video. It might not have closed captions enabled or it may be restricted.", "Markdown");
-      }
       return;
     }
 
