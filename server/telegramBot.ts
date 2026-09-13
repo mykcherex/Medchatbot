@@ -7,6 +7,7 @@ import { DEFAULT_MEDICAL_PROMPT } from "../src/constants";
 import { BotPersistenceService } from "./botPersistence";
 import { cleanAndFormatMedicalText, formatMedicalSymbols } from "./medicalFormatter";
 import { ChannelStorageService } from "./channelStorageService";
+import { YoutubeTranscript } from "youtube-transcript";
 import cron from "node-cron";
 
 export interface QuizData {
@@ -4302,6 +4303,66 @@ Medchat is equipped with multimodal perception powered by Google Gemini!
       this.userStates.delete(chatId);
       this.syncAndPersistState();
       await this.sendMessage(chatId, `✅ *Custom prompt updated!*\n\nYour new prompt:\n_${text}_\n\nTo revert, send /resetprompt`, "Markdown");
+      return;
+    }
+
+    // Check for YouTube Links
+    const youtubeMatch = text.match(/(?:https?:\/\/)?(?:www\.)?(?:youtube\.com\/(?:[^\/\n\s]+\/\S+\/|(?:v|e(?:mbed)?)\/|\S*?[?&]v=)|youtu\.be\/)([a-zA-Z0-9_-]{11})/);
+    if (youtubeMatch && youtubeMatch[1]) {
+      const videoId = youtubeMatch[1];
+      await this.sendChatAction(chatId, "typing");
+      
+      try {
+        await this.sendMessage(chatId, "⏳ *Fetching YouTube Transcript...*\n\nPlease wait while I analyze the video content.", "Markdown");
+        
+        const transcriptArr = await YoutubeTranscript.fetchTranscript(videoId);
+        const transcriptText = transcriptArr.map(t => t.text).join(" ");
+        
+        // Ensure transcript fits within reasonable context window limits
+        const truncatedTranscript = transcriptText.slice(0, 80000); // Rough limit to keep prompt size manageable
+        
+        const prompt = `You are a medical AI assistant. The user has shared a YouTube video with the following transcript:\n\n<transcript>\n${truncatedTranscript}\n</transcript>\n\nHere is the user's specific request regarding this video:\n\n<user_request>\n${text}\n</user_request>\n\nPlease fulfill the user's request based strictly on the content of this video (and your medical knowledge to contextualize it). If the user asks you to generate questions, quizzes, or summarize, do so comprehensively and structure your response nicely.`;
+
+        const history = this.chatHistories.get(chatId) || [];
+        const { text: reply, latencyMs, modelUsed } = await generateGeminiReply(
+          prompt,
+          history,
+          this.getSystemPrompt(chatId),
+          this.config.temperature,
+          [],
+          this.config.model
+        );
+
+        history.push({ role: 'user', text });
+        history.push({ role: 'model', text: reply });
+        if (history.length > 12) {
+          this.chatHistories.set(chatId, history.slice(-12));
+        } else {
+          this.chatHistories.set(chatId, history);
+        }
+
+        this.totalLatencySum += latencyMs;
+        this.totalLatencyCount++;
+
+        await this.sendSmartMedicalMessage(chatId, reply, "Markdown");
+        
+        this.logActivity({
+          id: `msg-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+          chatId,
+          userName,
+          userHandle,
+          userMessage: text,
+          aiResponse: reply,
+          latencyMs,
+          timestamp: new Date().toISOString(),
+          status: 'success',
+          source: 'telegram',
+        });
+
+      } catch (err: any) {
+        console.error("[Telegram] YouTube error:", err);
+        await this.sendMessage(chatId, "⚠️ *Error processing YouTube Video*\n\nI could not fetch the transcript for this video. It might not have closed captions enabled or it may be restricted.", "Markdown");
+      }
       return;
     }
 
