@@ -3503,7 +3503,15 @@ Address the user's query with expert medical reasoning, quoting and synthesizing
     const sender = message.from || {};
     const userName = sender.first_name ? `${sender.first_name}${sender.last_name ? ' ' + sender.last_name : ''}` : "Medical Student";
     const userHandle = sender.username ? `@${sender.username}` : undefined;
-    const text = (message.text || "").trim();
+    let text = (message.text || "").trim();
+
+    // Strip bot mention for group chat commands (e.g., /rapidfire@botname)
+    if (this.botInfo?.username && text.startsWith("/")) {
+      const mention = `@${this.botInfo.username}`;
+      if (text.toLowerCase().includes(mention.toLowerCase())) {
+        text = text.replace(new RegExp(mention, 'i'), '').trim();
+      }
+    }
 
     // 0. Superadmin claim command (/claimadmin <passcode> or /adminlogin <passcode>)
     if (text.startsWith("/claimadmin") || text.startsWith("/adminlogin")) {
